@@ -1,0 +1,16 @@
+.venv/
+runtime/
+release/
+test-results/
+__pycache__/
+*.py[cod]
+.pio/
+open_bridge/firmware/*.bin
+open_bridge/firmware/*.elf
+open_bridge/dist/
+open_bridge/licenses/*.zip
+*.log
+*.jsonl
+settings.json
+firmware-backups/
+flash-logs/

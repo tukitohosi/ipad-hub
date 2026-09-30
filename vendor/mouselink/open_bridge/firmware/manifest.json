@@ -1,0 +1,38 @@
+{
+  "chip": "esp32c3",
+  "flash_size": 4194304,
+  "version": "absolute-ack-v3 (2026-09-25)",
+  "images": {
+    "bootloader.bin": {
+      "offset": 0,
+      "size": 21152,
+      "sha256": "2a1ec7c8c6a5ee94c1ed10502b132eb99b51f1546476217a2cda82fba4e7a894"
+    },
+    "partitions.bin": {
+      "offset": 32768,
+      "size": 3072,
+      "sha256": "7f00b6c042a89b15b0cac534f82ed988caf29278ff5700b0c511eb1b5bb7c820"
+    },
+    "firmware.bin": {
+      "offset": 65536,
+      "size": 775648,
+      "sha256": "27273c922fbc2b8ccd668da3fbcbc585b8c6fce78fbc1699b8c3bfeb28a02299"
+    }
+  },
+  "compatible_apps": [
+    {
+      "size": 775648,
+      "sha256": "27273c922fbc2b8ccd668da3fbcbc585b8c6fce78fbc1699b8c3bfeb28a02299"
+    }
+  ],
+  "compatible_bootloaders": [
+    {
+      "size": 21152,
+      "sha256": "2a1ec7c8c6a5ee94c1ed10502b132eb99b51f1546476217a2cda82fba4e7a894"
+    },
+    {
+      "size": 21152,
+      "sha256": "af694c56e9f95d751495e6a6e31c8cff8db4b5a06a64641f5c07f60504a0d5a5"
+    }
+  ]
+}

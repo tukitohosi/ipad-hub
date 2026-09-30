@@ -1,0 +1,92 @@
+[
+  {
+    "name": "esptool",
+    "version": "5.4.0",
+    "license": "GPLv2+"
+  },
+  {
+    "name": "esp-pylib",
+    "version": "1.1.5",
+    "license": "Apache-2.0"
+  },
+  {
+    "name": "cryptography",
+    "version": "50.0.1",
+    "license": "Apache-2.0 OR BSD-3-Clause"
+  },
+  {
+    "name": "cffi",
+    "version": "2.1.1",
+    "license": "MIT-0"
+  },
+  {
+    "name": "pycparser",
+    "version": "3.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "bitstring",
+    "version": "4.4.0",
+    "license": "MIT"
+  },
+  {
+    "name": "bitarray",
+    "version": "3.11.0",
+    "license": "PSF-2.0"
+  },
+  {
+    "name": "reedsolo",
+    "version": "1.7.0",
+    "license": "Public Domain"
+  },
+  {
+    "name": "intelhex",
+    "version": "2.3.0",
+    "license": "BSD"
+  },
+  {
+    "name": "PyYAML",
+    "version": "6.0.3",
+    "license": "MIT"
+  },
+  {
+    "name": "rich-click",
+    "version": "1.9.9",
+    "license": "MIT License\n\nCopyright (c) 2022 Phil Ewels\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+  },
+  {
+    "name": "rich",
+    "version": "15.0.0",
+    "license": "MIT"
+  },
+  {
+    "name": "click",
+    "version": "8.5.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "markdown-it-py",
+    "version": "4.2.0",
+    "license": ""
+  },
+  {
+    "name": "mdurl",
+    "version": "0.1.2",
+    "license": ""
+  },
+  {
+    "name": "Pygments",
+    "version": "2.21.0",
+    "license": "BSD-2-Clause"
+  },
+  {
+    "name": "websockets",
+    "version": "17.1",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "colorama",
+    "version": "0.4.6",
+    "license": ""
+  }
+]

@@ -1,0 +1,117 @@
+{
+  "capturedAt": "2026-09-08",
+  "updatedAt": "2026-09-10",
+  "workspace": "C:\\Users\\稚青\\Desktop\\本地项目\\外设复用",
+  "repositories": [
+    {
+      "name": "DShare-HID",
+      "repository": "https://github.com/lockekk/dshare-hid",
+      "revision": "v1.26.0",
+      "commit": "98ebd60d11e33cf4b9f89fe97d54d120eed4ca06",
+      "license": "GPL-2.0-only",
+      "role": "preferred ESP32-C3 hardware-bridge trial"
+    },
+    {
+      "name": "windows-ble-hid",
+      "repository": "https://github.com/abhishek-raj/windows-ble-hid",
+      "revision": "v0.4.0",
+      "commit": "07f3b8884eaa604437fd2d29fc942455b689021e",
+      "license": "MIT",
+      "role": "software-only fallback and BLE HID reference"
+    },
+    {
+      "name": "OpenSpan",
+      "repository": "https://github.com/Divisionless/OpenSpan",
+      "revision": "f60a7124be4d3d3c1ee3726154eaf6fd48d73514",
+      "license": "MIT",
+      "role": "edge routing and recovery reference"
+    },
+    {
+      "name": "pico_usb_ble_hid_bridge",
+      "repository": "https://github.com/shiomachisoft/pico_usb_ble_hid_bridge",
+      "revision": "0420cdf23e5cc523800f11b599df41d593b7a8d7",
+      "license": "not declared by GitHub API",
+      "role": "iPad-tested hardware feasibility reference"
+    },
+    {
+      "name": "Deskflow",
+      "repository": "https://github.com/deskflow/deskflow",
+      "revision": "a930c87ea4ec5dc2e496424d58e365771eb44546",
+      "license": "GPL-2.0",
+      "role": "upstream screen-edge routing reference; not downloaded"
+    },
+    {
+      "name": "esp32-kvm",
+      "repository": "https://github.com/KMChris/esp32-kvm",
+      "revision": "99c52bc36128867d2a7ed85417c1043a7d06ed5c",
+      "commit": "99c52bc36128867d2a7ed85417c1043a7d06ed5c",
+      "license": "MIT",
+      "role": "open ESP32-C3 BLE HID firmware and Windows Raw Input bridge foundation"
+    }
+  ],
+  "files": [
+    {
+      "path": "third_party\\packages\\dshare-hid-1.26.0-win-x64-portable.7z",
+      "bytes": 20801312,
+      "sha256": "27B5251F28EE5BB177C85A80626C93F513C3D9FBBAEF16E71EE488783EFF997C"
+    },
+    {
+      "path": "third_party\\packages\\BleHid-Cli-v0.4.0-win-x64.zip",
+      "bytes": 37459047,
+      "sha256": "8936A1D0E938FE330B9E2D74C9E090DD1D500BA631EF0444F8C7014B9DDFED31"
+    },
+    {
+      "path": "third_party\\packages\\esp32-hid-factory-1.2.0.fzip",
+      "source": "https://github.com/lockekk/esp32-hid-release/releases/tag/v1.2.0",
+      "bytes": 3218960,
+      "sha256": "C73B52B4075FABE2294B2E387B09F504B2F52D57FBBE329ECAC1FBE50452FDA9"
+    },
+    {
+      "path": "third_party\\packages\\esp32-hid-upgrade-1.2.0.uzip",
+      "source": "https://github.com/lockekk/esp32-hid-release/releases/tag/v1.2.0",
+      "bytes": 1380404,
+      "sha256": "42D19C96D59809010DA20F91AF407531ECC96CA346E0D1FDAFE507B321EEBF29"
+    },
+    {
+      "path": "third_party\\sources\\dshare-hid-v1.26.0-source.zip",
+      "bytes": 7093662,
+      "sha256": "0ED0A78FAD48E4336FB713FDE53B45E2296E180349C3E339A248244D2F97EB13"
+    },
+    {
+      "path": "third_party\\sources\\windows-ble-hid-v0.4.0-source.zip",
+      "bytes": 122666,
+      "sha256": "AAF5BA7CCB4A7211060F00F189F893466FEA2042DD9020ADBB2F1193350171C3"
+    },
+    {
+      "path": "third_party\\sources\\OpenSpan-f60a712-source.zip",
+      "bytes": 160433,
+      "sha256": "D545FE72EA64BE27CBF1B7466E8107C7E99A4DFB403B2F9A7FD024A17ACBD4F8"
+    },
+    {
+      "path": "third_party\\sources\\pico-usb-ble-hid-0420cdf-source.zip",
+      "bytes": 696212,
+      "sha256": "BBCB4CD2001657C0DB914BD083212738C163EF4B3C7B7623CD47DFADEFBB5118"
+    }
+  ],
+  "executableChecks": [
+    {
+      "name": "dshare-hid.exe",
+      "fileVersion": "1.26.0.9999",
+      "authenticode": "NotSigned",
+      "sha256": "992974DFE51431E419E0D4273D3D13D60AA97546A2513ED0E965D146926658B3"
+    },
+    {
+      "name": "BleHid.Cli.exe",
+      "fileVersion": "1.0.0.0",
+      "authenticode": "NotSigned",
+      "sha256": "7014AF967C6A6F4F922150A2E56977BB575D365FD8D7254C885988D34A0AD0EA"
+    }
+  ],
+  "securityScan": {
+    "engine": "Microsoft Defender MpCmdRun custom scan",
+    "target": "third_party (including DShare firmware release files)",
+    "remediation": "disabled",
+    "result": "no threats found",
+    "exitCode": 0
+  }
+}
