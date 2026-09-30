@@ -21,7 +21,7 @@ ALLOWED_EXTENSIONS = {".py", ".ps1", ".cmd", ".bat", ".spec", ".iss", ".isl", ".
     ".esp32-c3-supermini", ".csv", ".html", ".css", ".js", ".mjs", ".ts", ".sh", ".patch",
     ".cs", ".csproj", ".xml", ".xaml", ".manifest", ".m", ".mm", ".plist", ".entitlements",
     ".service", ".desktop", ".projbuild", ".pio", ".lua", ".theme", ".example", ".applescript",
-    ".icns", ".tiff"}
+    ".icns", ".tiff", ".lgpl"}
 SPECIAL_FILES = {"vendor/mouselink/open_bridge/dist/bootloader.bin"}
 
 
