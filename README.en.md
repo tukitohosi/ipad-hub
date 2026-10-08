@@ -1,45 +1,42 @@
 # iPadHub
 
-[中文](README.md) | [English](README.en.md)
+[简体中文](README.md) | English
 
-iPadHub brings iPad extended display and ESP32-C3 keyboard/mouse control into one Windows x64 application. It combines the MouseLink Python bridge and the iPad互联 C++ display backend behind a shared interface. The first release runs one mode at a time and waits for resource release and process exit before switching.
+**iPad extended display and keyboard/mouse control in one Windows app.**
 
-**Current release: [0.1.0-preview](https://github.com/tukitohosi/ipad-hub/releases/tag/v0.1.0-preview).** This is an integration preview with real backends. Hardware endurance tests and clean Windows installation are still pending.
+Use an iPad as a second screen over USB or Wi-Fi, or control its native apps with your PC's keyboard and mouse through an ESP32-C3 bridge.
+
+Current release: **0.1.0-preview**. [Download](https://github.com/tukitohosi/ipad-hub/releases/tag/v0.1.0-preview)
 
 ![iPadHub interface preview](docs/images/home-preview.png)
 
-The screenshot uses an isolated interactive preview with simulated state. It does not show a connected personal device.
-
-## Features and requirements
+## Features
 
 | Mode | Features | Requirements |
 | --- | --- | --- |
-| Extended display | USB / Wi-Fi connection, device discovery, manual address and quality presets | OpenDisplay running on the iPad; a working Windows virtual display driver; Apple device services for USB |
-| Keyboard and mouse | Control native iPad apps, left / right placement, speed, free / locked mode and optional calibration | Compatible ESP32-C3 connected by USB and paired with the iPad over Bluetooth |
-| Device tools | Firmware backup, flashing, recovery and diagnostics | Compatible board; explicit confirmation in the tool window before flashing / recovery |
+| Extended display | USB and Wi-Fi, device discovery, quality presets | OpenDisplay on the iPad and a Windows virtual display driver; Apple device services for USB |
+| Keyboard and mouse | Native iPad app control, left/right placement, free/locked switching and speed adjustment | A compatible ESP32-C3 connected to the PC by USB and paired with the iPad |
+| Device tools | Firmware backup, flashing and restoration | A compatible board and USB data cable |
 
-The home page does not connect automatically. Closing the window minimizes to the tray; quitting stops the backend. A failed resource release blocks mode switching.
+The current release runs one mode at a time. Switching stops the current mode and releases its devices before starting the next.
 
-## Download
+## Download and use
 
-Use [GitHub Releases](https://github.com/tukitohosi/ipad-hub/releases) for the Windows x64 installer, complete portable ZIP, matching source ZIP, SHA-256 lists and validation reports. Extract the whole portable folder before running `iPadHub.exe`.
+Get the Windows x64 installer or portable ZIP from the [release page](https://github.com/tukitohosi/ipad-hub/releases/tag/v0.1.0-preview). Extract the entire portable folder before opening iPadHub.exe. The release also includes the matching source ZIP and checksum lists.
 
-The installer is unsigned. It does not bundle or install Parsec drivers or change firewall rules. Configure the receiver and display driver separately.
+Install the display driver and iPad receiver separately; the installer does not change firewall rules.
 
-## Data and coexistence
+The home page does not connect automatically or capture input. Closing the window minimizes to the tray; quitting stops the backend. Press **Ctrl + Alt + Esc** to return keyboard and mouse control to Windows in an emergency.
 
-Compatible legacy settings and firmware backups are copied into `%LOCALAPPDATA%\iPadHub` on first launch. Existing new files are not overwritten. The new display registry namespace is `HKCU\Software\iPadHub\Display`; uninstalling keeps the user data by default.
+## Data and limitations
 
-The original MouseLink and iPad互联 applications can remain installed. Quit iPadHub before returning to an original application so that only one application uses each resource.
+Compatible legacy settings and firmware backups are copied into the current user's LocalAppData/iPadHub folder. MouseLink and iPad互联 can remain installed; quit iPadHub before using them with the same devices. Uninstalling keeps user data by default.
 
-## Validation and building
+- This integration preview cannot run both modes at once.
+- OpenDisplay must stay in the foreground for extended display.
+- Keyboard/mouse control requires the compatible ESP32-C3; the PC's own Bluetooth is not a substitute.
+- Keep USB connected during firmware operations.
 
-Local regression tests, C++ builds, device-free pipe checks, frozen application startup, ZIP CRC and license checks passed. At least 50 real hardware switches, 60-minute USB / Wi-Fi / bridge sessions, disconnect and sleep recovery, firmware operations, clean Windows installation and installation / upgrade / uninstall behavior remain unverified. See the [acceptance record](docs/release-acceptance.md) and release reports.
+## Development and license
 
-Building requires Python 3.12, Visual Studio 2022 C++ x64 / CMake / Windows SDK and Inno Setup 6. Python versions are locked by `vendor/mouselink/open_bridge/requirements-desktop-lock.txt`. See [build instructions](docs/packaging.md). Run `python -m ipadhub.app --preview` for a hardware-free, in-memory interface preview.
-
-The release source ZIP remains the exact source delivered with the binary. The repository additionally includes publishing documentation and a build-script alias for `frozen-engines-smoke.json`, identical in content to `engine-smoke.json`.
-
-## License
-
-The integrated product ships corresponding source under [GPL-3.0](LICENSE). MouseLink / esp32-kvm retains MIT terms, the opendisplay-win derivative retains GPL terms, and Qt / PySide6 and other components retain their licenses. Qt DLLs are distributed separately. See [third-party notices](THIRD_PARTY_NOTICES.md) and the bundled `licenses/` directory. This project is not a Parsec compatibility certification.
+See the [build instructions](docs/packaging.md). The combined product provides source under [GPL-3.0](LICENSE); components retain their original licenses. See [third-party notices](THIRD_PARTY_NOTICES.md).
