@@ -445,7 +445,7 @@ class ControllerNativeEdgeTests(unittest.TestCase):
         return c
 
     def flush(self, c, at):
-        with patch("bridge.time.monotonic", return_value=at):
+        with patch("bridge.time.perf_counter", return_value=at):
             c._flush_native_mouse(force=True)
 
     def ack(self, c, at):
@@ -458,7 +458,7 @@ class ControllerNativeEdgeTests(unittest.TestCase):
         c = self.controller()
         self.flush(c, 1)
         self.ack(c, 1.01)
-        with patch("bridge.time.monotonic", return_value=2):
+        with patch("bridge.time.perf_counter", return_value=2):
             c._handle_raw_mouse_move(0, 2)
         self.ack(c, 2.01)
         self.flush(c, 2.02)
@@ -467,13 +467,13 @@ class ControllerNativeEdgeTests(unittest.TestCase):
     def test_integration_uses_relative_for_motion_buttons_and_scroll(self):
         c = self.relative_controller()
         before = c._bridge.send_absolute_report.call_count
-        with patch("bridge.time.monotonic", return_value=3):
+        with patch("bridge.time.perf_counter", return_value=3):
             c._handle_raw_mouse_move(0, 8)
         self.assertEqual(c._bridge.send_mouse_report.call_args.args, (0, 0, 4, 0))
-        with patch("bridge.time.monotonic", return_value=3.1):
+        with patch("bridge.time.perf_counter", return_value=3.1):
             c._handle_mouse_click(0, 0, mouse.Button.left, True)
         self.assertEqual(c._bridge.send_mouse_report.call_args.args, (1, 0, 0, 0))
-        with patch("bridge.time.monotonic", return_value=3.2):
+        with patch("bridge.time.perf_counter", return_value=3.2):
             c._handle_mouse_scroll(0, 0, 0, 2)
         self.assertEqual(c._bridge.send_mouse_report.call_args.args, (1, 0, 0, 2))
         self.assertEqual(c._bridge.send_absolute_report.call_count, before)
@@ -502,7 +502,7 @@ class ControllerNativeEdgeTests(unittest.TestCase):
         self.flush(c, 1)
         c._state.mouse_buttons = 1
         c._native_edges._recent_sequences = {i: 2 for i in range(256)}
-        with patch("bridge.time.monotonic", return_value=2.1):
+        with patch("bridge.time.perf_counter", return_value=2.1):
             c._release_all_remote_inputs()
         c._bridge.send_absolute_report.assert_called_with(0, 16384, 32767, 0, 0)
         c._bridge.send_mouse_report.assert_called_with(0, 0, 0, 0)
@@ -511,7 +511,7 @@ class ControllerNativeEdgeTests(unittest.TestCase):
         c = self.controller()
         self.flush(c, 1)
         self.ack(c, 1.01)
-        with patch("bridge.time.monotonic", return_value=2):
+        with patch("bridge.time.perf_counter", return_value=2):
             c._handle_raw_mouse_move(0, 2)
         self.ack(c, 2.01)
         c._bridge.send_mouse_report.return_value = False
@@ -524,7 +524,7 @@ class ControllerNativeEdgeTests(unittest.TestCase):
     def test_serial_failure_returns_control(self):
         c = self.relative_controller()
         c._bridge.send_mouse_report.return_value = False
-        with patch("bridge.time.monotonic", return_value=3):
+        with patch("bridge.time.perf_counter", return_value=3):
             c._handle_raw_mouse_move(0, 8)
         self.assertTrue(c._exit_requested)
         self.assertEqual(c._exit_reason, "ESP32 USB disconnected")

@@ -9,7 +9,7 @@ from PyInstaller.utils.win32.versioninfo import (
 
 root = Path(SPECPATH).parent
 bridge = root / "vendor/mouselink/open_bridge"
-version = os.environ.get("IPADHUB_BUILD_VERSION", "0.1.0-preview")
+version = os.environ.get("IPADHUB_BUILD_VERSION", "0.1.1-preview")
 numbers = tuple(int(x) for x in version.split("-")[0].split("+")[0].split(".")) + (0,)
 display = root / "build/ipadhub-display/Release/iPadHubDisplay.exe"
 if not display.is_file():

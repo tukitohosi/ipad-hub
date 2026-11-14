@@ -1,6 +1,6 @@
 ; Independent application; preserves both original products and every data root.
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-preview"
+  #define MyAppVersion "0.1.1-preview"
 #endif
 #ifndef StageDir
   #error "Run scripts\package-ipadhub.ps1 to supply the validated StageDir"

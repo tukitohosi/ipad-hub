@@ -109,7 +109,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--version", default="0.1.0-preview")
+    parser.add_argument("--version", default="0.1.1-preview")
     args = parser.parse_args()
     bundle, output = args.bundle.resolve(), args.output.resolve()
     bundle.relative_to(ROOT / "build")

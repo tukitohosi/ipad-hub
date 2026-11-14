@@ -64,7 +64,7 @@ class SegmentedChoice(QWidget):
 
     def __init__(self, items, *, captions=None, glyphs=None):
         super().__init__()
-        self.items = items
+        self.items = []
         self.buttons = []
         self.dark = False
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -75,39 +75,54 @@ class SegmentedChoice(QWidget):
         layout.setContentsMargins(0, 0, 0, 0) if captions else layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10 if captions else 4)
         for index, text in enumerate(items):
-            b = ChoiceButton("" if captions else text, self)
-            b.setObjectName("choiceCard" if captions else "segment")
-            b.setAccessibleName(text + (f"，{captions[index]}" if captions else ""))
-            b.setCheckable(True)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setMinimumHeight(78 if captions else 36)
-            b.setMinimumWidth(0)
-            if glyphs:
-                b.setProperty("glyph", glyphs[index])
-                b.setIconSize(QSize(17, 17))
-            if captions:
-                inner = QVBoxLayout(b)
-                inner.setContentsMargins(14, 11, 12, 11)
-                inner.setSpacing(4)
-                for content, role in ((text, "optionTitle"), (captions[index], "optionCaption")):
-                    t = QLabel(content)
-                    t.setProperty("role", role)
-                    t.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-                    inner.addWidget(t)
-            self.group.addButton(b, index)
-            self.buttons.append(b)
-            layout.addWidget(b, 1)
-            b.toggled.connect(lambda _: self.update_icons())
+            self.addItem(text, captions[index] if captions else None, glyphs[index] if glyphs else None)
         self.buttons[0].setChecked(True)
-        self.group.idClicked.connect(lambda i: self.currentTextChanged.emit(self.items[i]))
+        self.group.idToggled.connect(self._selection_toggled)
+
+    def _selection_toggled(self, index, checked):
+        if checked:
+            self.currentTextChanged.emit(self.items[index])
+
+    def addItem(self, text, caption=None, glyph=None):
+        b = ChoiceButton("" if caption else text, self)
+        b.setObjectName("choiceCard" if caption else "segment")
+        b.setAccessibleName(text + (f"，{caption}" if caption else ""))
+        b.setCheckable(True)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setMinimumHeight(78 if caption else 36)
+        b.setMinimumWidth(0)
+        if glyph:
+            b.setProperty("glyph", glyph)
+            b.setIconSize(QSize(17, 17))
+        if caption:
+            inner = QVBoxLayout(b)
+            inner.setContentsMargins(14, 11, 12, 11)
+            inner.setSpacing(4)
+            for content, role in ((text, "optionTitle"), (caption, "optionCaption")):
+                t = QLabel(content)
+                t.setProperty("role", role)
+                t.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                inner.addWidget(t)
+        self.group.addButton(b, len(self.items))
+        self.items.append(text)
+        self.buttons.append(b)
+        self.layout().addWidget(b, 1)
+        b.toggled.connect(lambda _: self.update_icons())
 
     def currentText(self):
-        return self.items[self.group.checkedId()]
+        index = self.group.checkedId()
+        return self.items[index] if index >= 0 else ""
+
+    def clearSelection(self):
+        current = self.group.checkedButton()
+        if current:
+            self.group.setExclusive(False)
+            current.setChecked(False)
+            self.group.setExclusive(True)
 
     def setCurrentText(self, text):
         if text in self.items and text != self.currentText():
             self.buttons[self.items.index(text)].setChecked(True)
-            self.currentTextChanged.emit(text)
 
     def set_theme(self, dark):
         self.dark = dark

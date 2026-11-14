@@ -1,4 +1,5 @@
 #include "display/VirtualDisplay.h"
+#include "display/DisplayCatalog.h"
 
 #include "app/Log.h"
 
@@ -485,6 +486,84 @@ void VirtualDisplay::Close()
 
 #ifdef IPADHUB_ENGINE
 bool VirtualDisplay::CleanupSucceeded() { return gHubCleanupSucceeded.load(); }
+
+std::string VirtualDisplay::CurrentSide() const
+{
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    if (monitorPathKey_.empty()) return {};
+    for (const auto& path : ActiveParsecPaths()) {
+        if (path.monitorKey == monitorPathKey_ && path.deviceName == deviceName_)
+            return HorizontalSide(EnumerateAttachedDisplays(), deviceName_);
+    }
+    return {};
+}
+
+bool VirtualDisplay::PlaceOnSide(bool left, std::string& error)
+{
+    std::wstring name, key;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        name = deviceName_;
+        key = monitorPathKey_;
+    }
+    if (key.empty()) { error = "尚未确认当前 iPad 的虚拟显示器"; return false; }
+    // Keep every supplied path/mode intact. Change just the source position
+    // whose live target path matches the identity claimed after VddAddDisplay.
+    constexpr UINT32 query = QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE;
+    UINT32 pathCount = 0, modeCount = 0;
+    if (GetDisplayConfigBufferSizes(query, &pathCount, &modeCount) != ERROR_SUCCESS || !pathCount || !modeCount) {
+        error = "无法读取 Windows 显示器布局"; return false;
+    }
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    if (QueryDisplayConfig(query, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) != ERROR_SUCCESS) {
+        error = "Windows 显示器布局正在变更，请重试"; return false;
+    }
+    paths.resize(pathCount);
+    const DISPLAYCONFIG_PATH_INFO* owned = nullptr;
+    for (const auto& p : paths) {
+        DISPLAYCONFIG_TARGET_DEVICE_NAME target{};
+        target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target), p.targetInfo.adapterId, p.targetInfo.id};
+        if (DisplayConfigGetDeviceInfo(&target.header) != ERROR_SUCCESS || key != MonitorKey(target.monitorDevicePath)) continue;
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+        source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source), p.sourceInfo.adapterId, p.sourceInfo.id};
+        if (owned || DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS || name != source.viewGdiDeviceName) {
+            error = "虚拟显示器的 Windows 标识已更改，请重试"; return false;
+        }
+        owned = &p;
+    }
+    if (!owned) { error = "当前 iPad 的虚拟显示器已断开"; return false; }
+    for (const auto& p : paths) {
+        if (&p != owned && p.sourceInfo.id == owned->sourceInfo.id && SameLuid(p.sourceInfo.adapterId, owned->sourceInfo.adapterId)) {
+            error = "此屏幕正与其他显示器复制显示，请先在 Windows 中设为扩展"; return false;
+        }
+    }
+    const UINT32 index = (owned->flags & DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE)
+        ? owned->sourceInfo.sourceModeInfoIdx : owned->sourceInfo.modeInfoIdx;
+    if (index >= modeCount || modes[index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE ||
+        modes[index].id != owned->sourceInfo.id || !SameLuid(modes[index].adapterId, owned->sourceInfo.adapterId)) {
+        error = "无法确认当前 iPad 的 Windows 显示模式"; return false;
+    }
+    const auto attached = EnumerateAttachedDisplays();
+    const auto position = SidePosition(attached, name, left);
+    if (!position) { error = "无法在主显示器这一侧安全放置 iPad 副屏"; return false; }
+    auto& source = modes[index].sourceMode;
+    if (source.position.x != position->x || source.position.y != position->y) {
+        source.position = {position->x, position->y};
+        constexpr UINT32 flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE;
+        LONG result = SetDisplayConfig(pathCount, paths.data(), modeCount, modes.data(), flags | SDC_VALIDATE);
+        if (result == ERROR_SUCCESS)
+            result = SetDisplayConfig(pathCount, paths.data(), modeCount, modes.data(), flags | SDC_APPLY | SDC_SAVE_TO_DATABASE);
+        if (result != ERROR_SUCCESS) {
+            error = "Windows 未能应用副屏位置（错误 " + std::to_string(result) + "）"; return false;
+        }
+    }
+    if (!QueryMonitorRect()) { error = "Windows 尚未确认副屏的新位置"; return false; }
+    const auto actual = MonitorRect();
+    if (actual.left != position->x || actual.top != position->y) { error = "Windows 未采用请求的副屏位置"; return false; }
+    SavePosition(actual.left, actual.top);
+    return true;
+}
 #endif
 
 void VirtualDisplay::KeepAliveLoop()

@@ -18,7 +18,7 @@
 ```powershell
 & 'C:\Users\稚青\AppData\Local\Programs\Python\Python312\python.exe' -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -r vendor\mouselink\open_bridge\requirements-desktop-lock.txt
-& .\scripts\package-ipadhub.ps1 -Version 0.1.0-preview
+& .\scripts\package-ipadhub.ps1 -Version 0.1.1-preview
 ```
 
 已有项目虚拟环境无需重建。脚本依次构建与测试 C++ 后台、运行 iPadHub 单元回归、构建 PyInstaller 主应用和独立刷机助手、验证固件、运行无设备应用自检与冻结后台握手、生成对应源码与便携 ZIP，最后编译 Inno 安装包。后台握手启动已打包的 `iPadHub.exe --engine bridge` 与带 `--no-device` 的 C++ 后台，仅发送 `status/shutdown`，核对 `hello`、状态、资源释放及正常退出；不运行发现或连接。`-SkipDisplayBuild` 仅用于刚完成同一源码版本 C++ 构建的本地重试；`-SkipInstaller` 可仅生成便携与源码。

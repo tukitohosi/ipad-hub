@@ -92,7 +92,7 @@ class PlacementControllerTests(unittest.TestCase):
         with patch("bridge._user32", api), \
              patch("bridge.keyboard.Listener") as listener, \
              patch("bridge.time.sleep"), \
-             patch("bridge.time.monotonic", side_effect=lambda: next(moments)):
+             patch("bridge.time.perf_counter", side_effect=lambda: next(moments)):
             activated = c._wait_for_activation()
         listener.return_value.stop.assert_called_once()
         listener.return_value.join.assert_called_once()
@@ -117,12 +117,12 @@ class PlacementControllerTests(unittest.TestCase):
         c._is_active = True
         c._bridge = Mock(status=Status())
         c._pointer = AbsolutePointer(x=32112, return_edge="right")
-        with patch("bridge.time.monotonic", return_value=2):
+        with patch("bridge.time.perf_counter", return_value=2):
             c._handle_raw_mouse_move(-5, 3)
         self.assertEqual(c._pointer.report_position, (32032, 16432))
         c._pointer.x = 32767
         c._pointer.sent(32767, 16432, 2, True)
-        with patch("bridge.time.monotonic", return_value=3):
+        with patch("bridge.time.perf_counter", return_value=3):
             c._handle_raw_mouse_move(2, 0)
         self.assertTrue(c._exit_requested)
         self.assertEqual(c._exit_reason, "iPad right edge")
@@ -143,7 +143,7 @@ class PlacementControllerTests(unittest.TestCase):
         c = KVMController(BridgeConfig(require_ready_on_start=True))
         c._bridge = Mock(is_connected=True, absolute_ready=False)
         c._cursor = Mock()
-        with patch("bridge.time.monotonic", side_effect=[0, .5, 1, 1.5]), \
+        with patch("bridge.time.perf_counter", side_effect=[0, .5, 1, 1.5]), \
              patch("bridge.time.sleep") as sleep, \
              patch.object(c, "_wait_for_activation") as activate:
             with self.assertRaisesRegex(RuntimeError, "not ready"):

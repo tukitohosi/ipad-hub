@@ -14,6 +14,7 @@
 namespace od {
 
 class Connection;
+class VirtualDisplay;
 struct CaptureTimings;
 struct EncoderDiagnostics;
 
@@ -30,6 +31,9 @@ struct StreamSettings {
     uint32_t bitrateBps = 30'000'000;
     bool requirePrivateNetwork = true;
     std::vector<std::string> candidateTargets;
+#ifdef IPADHUB_ENGINE
+    std::string displaySide;
+#endif
 
     // Empty: create and own a Parsec virtual display (normal product mode).
     // Non-empty: capture that already-attached \\.\DISPLAYn read-only. This is
@@ -92,6 +96,10 @@ struct ConnectionSnapshot {
     double encodeMs = -1.0;
     PipelineMetrics pipeline;
     std::wstring displayName;
+#ifdef IPADHUB_ENGINE
+    std::string displaySide;
+    std::string displaySideError;
+#endif
 };
 
 // Owns the sender lifecycle: connect, wait for hello, build the capture/encode
@@ -141,8 +149,18 @@ public:
     uint32_t BlockedByHeight() const { return blockedByHeight_.load(); }
 
     ConnectionSnapshot Snapshot() const;
+#ifdef IPADHUB_ENGINE
+    bool SetDisplaySide(const std::string& side, std::string& error);
+#endif
 
 private:
+#ifdef IPADHUB_ENGINE
+    mutable std::mutex layoutMutex_;
+    VirtualDisplay* layoutDisplay_ = nullptr; // protected by layoutMutex_, only published after attach
+    std::string requestedSide_, layoutError_;
+    mutable std::string confirmedSide_;
+    mutable std::chrono::steady_clock::time_point nextSideRead_{};
+#endif
     void RunLoop(std::string ip, uint16_t port, StreamSettings settings,
                  std::string expectedDeviceId, std::string transport);
     void InterruptibleSleep(int ms);

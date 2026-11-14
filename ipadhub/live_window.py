@@ -9,9 +9,11 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QInputDialog,
                                QLabel, QMessageBox, QPushButton, QWidget)
 
-from .app import HubWindow, NAMES, button
+from . import __version__
+from .app import HubWindow, NAMES, QUALITY_PRESETS, button, label
 from .model import Mode, State
 from .runtime import RuntimeController, bridge_modules, engine_command
+from .speed_wizard import SpeedWizard, calibration_backend
 
 
 def bounded_int(value, default, minimum, maximum):
@@ -25,8 +27,12 @@ class LiveHubWindow(HubWindow):
     def __init__(self, storage, migrate=True, controller_factory=RuntimeController):
         self.storage = storage
         self._loading = True
+        self._quality_reconnecting = False
         self.runtime = None
+        self._display_move_pending = None
+        self._display_move_error = ""
         self.flash_dialog = None
+        self.speed_wizard = None
         self.tool_lock = None
         self.resolution_task = None
         self._resolution_after_stop = None
@@ -35,7 +41,7 @@ class LiveHubWindow(HubWindow):
         self._closing = False
         self.devices_by_mode = {Mode.DISPLAY: [], Mode.BRIDGE: []}
         super().__init__(preview=False)
-        self.setWindowTitle("iPadHub")
+        self.setWindowTitle(f"iPadHub · {__version__}")
         self.tray.setToolTip("iPadHub")
         for action in self.tray.contextMenu().actions():
             if "模拟" in action.text():
@@ -53,7 +59,7 @@ class LiveHubWindow(HubWindow):
         self.session = self.runtime
         self.runtime.changed.connect(self.refresh)
         self.runtime.devices.connect(self._devices_found)
-        self.runtime.event.connect(self._engine_event)
+        self.runtime.engine_event.connect(self._engine_event)
         self.runtime.stopped.connect(self._stopped)
         self.discovery_buttons = []
         for mode, controls in self.mode_controls.items():
@@ -81,22 +87,33 @@ class LiveHubWindow(HubWindow):
         self.hotkey_toggle.toggled.connect(lambda _: self.save_preferences())
         self.speed_control.setRange(25, 150)
         self.speed_control.setValue(bounded_int(self.preferences.get("speed", bridge_settings.get("speed", 50)), 50, 25, 150))
+        self._setup_speed_matching(bridge_settings)
         self.position_choice.setCurrentText("电脑左侧" if self.preferences.get("ipad_side", bridge_settings.get("ipad_side")) == "left" else "电脑右侧")
         self.bridge_mode_choice.setCurrentText("锁定模式" if self.preferences.get("bridge_mode", bridge_settings.get("mode")) == "locked" else "自由模式")
         self.transport_choice.setCurrentText({"auto": "自动", "usb": "USB", "wifi": "Wi-Fi"}.get(self.preferences.get("transport"), "自动"))
-        profile = self.preferences.get("profile") or {0: "balanced", 1: "smooth", 2: "sharp", 3: "custom"}.get(bounded_int(display_settings.get("streamProfile"), 0, 0, 3), "balanced")
+        self._show_display_side(self.preferences.get("display_side"))
+        self.display_side_choice.currentTextChanged.connect(self._choose_display_side)
         self.custom_fps = bounded_int(self.preferences.get("custom_fps", display_settings.get("fps", 60)), 60, 30, 120)
         self.custom_bitrate = bounded_int(self.preferences.get("custom_bitrate", display_settings.get("bitrateMbps", 30)), 30, 5, 100)
-        self.custom_quality = QCheckBox(f"沿用原自定义画质（{self.custom_fps} 帧 / {self.custom_bitrate} Mbps）")
-        self.custom_quality.setChecked(profile == "custom")
-        self.custom_quality.setVisible(profile == "custom")
-        self.mode_controls[Mode.DISPLAY]["advanced"].addRow(self.custom_quality)
-        self.custom_quality.toggled.connect(lambda _: (self.save_preferences(), self.refresh()))
-        self.quality_choice.setCurrentText({"balanced": "均衡", "sharp": "清晰", "smooth": "流畅"}.get(profile, "均衡"))
+        # Old display configs without a streamProfile use non-default numeric
+        # values to indicate custom quality, as in the native config parser.
+        default_id = 3 if (display_settings.get("fps", 60), display_settings.get("bitrateMbps", 30)) != (60, 30) else 0
+        imported_id = bounded_int(display_settings.get("streamProfile"), default_id, 0, 3)
+        profile = self.preferences.get("profile") or ("balanced", "smooth", "sharp", "custom")[imported_id]
+        old_custom_values = ("custom_fps" in self.preferences and "custom_bitrate" in self.preferences
+                             and (self.custom_fps, self.custom_bitrate) != (60, 30))
+        has_custom = self.preferences.get("has_custom_quality", imported_id == 3 or old_custom_values)
+        if profile == "custom" or has_custom:
+            self.quality_choice.addItem("自定义", f"{self.custom_fps} 帧\n{self.custom_bitrate} Mbps")
+        profile_labels = {key: name for name, (key, _) in QUALITY_PRESETS.items()}
+        self.quality_choice.setCurrentText("自定义" if profile == "custom" else profile_labels.get(profile, "均衡"))
+        self.quality_hint = label("", "hint")
+        self.mode_controls[Mode.DISPLAY]["form"].addRow("", self.quality_hint)
         self.priority_choice.setCurrentIndex(0 if self.preferences.get("remember_device", True) else 1)
         self.theme_box.setCurrentText({"system": "跟随系统", "light": "浅色", "dark": "深色"}.get(self.preferences.get("theme"), "跟随系统"))
         self.set_theme(self.theme_box.currentText())
-        for control in (self.position_choice, self.transport_choice, self.quality_choice, self.bridge_mode_choice):
+        self.quality_choice.currentTextChanged.connect(self._quality_changed)
+        for control in (self.position_choice, self.transport_choice, self.bridge_mode_choice):
             control.currentTextChanged.connect(lambda _: self.save_preferences())
         self.speed_control.valueChanged.connect(lambda _: self.save_preferences())
         self.priority_choice.currentIndexChanged.connect(lambda _: self.save_preferences())
@@ -120,10 +137,128 @@ class LiveHubWindow(HubWindow):
         self.refresh()
 
     def _bridge_options(self):
-        return dict(mode="locked" if self.bridge_mode_choice.currentText() == "锁定模式" else "free",
-                    speed=self.speed_control.value() / 100,
-                    ipad_side="left" if self.position_choice.currentText() == "电脑左侧" else "right",
-                    hotkey_return_enabled=self.hotkey_toggle.isChecked())
+        options = dict(mode="locked" if self.bridge_mode_choice.currentText() == "锁定模式" else "free",
+                       speed=self.speed_control.value() / 100,
+                       ipad_side="left" if self.position_choice.currentText() == "电脑左侧" else "right",
+                       hotkey_return_enabled=self.hotkey_toggle.isChecked())
+        if self._has_profile_record:
+            options["pointer_profile"] = self.pointer_profile if self.speed_match_toggle.isChecked() else None
+        return options
+
+    def _setup_speed_matching(self, bridge_settings):
+        profile = self.preferences.get("pointer_profile", bridge_settings.get("pointer_profile"))
+        self._has_profile_record = profile is not None
+        self.pointer_profile = None
+        if isinstance(profile, dict):
+            try:
+                self.pointer_profile = calibration_backend().validate_profile(profile)
+            except ValueError:
+                pass
+        self.speed_match_toggle = QCheckBox("使用已校准速度（100% 匹配电脑）")
+        self.speed_match_toggle.setToolTip("更换鼠标、切换 iPad 横竖屏或调整 Windows 指针速度后，请重新校准。")
+        enabled = bool(self.pointer_profile) and self.preferences.get("pointer_profile_enabled", True) is True
+        self.speed_match_toggle.setChecked(enabled)
+        self.speed_match_toggle.setVisible(bool(self.pointer_profile))
+        self.speed_match_toggle.toggled.connect(self._toggle_speed_match)
+        if self._has_profile_record and not enabled:
+            self.speed_control.setValue(bounded_int(self.preferences.get("manual_speed", 50), 50, 25, 150))
+        self.calibrate_speed_button = button("匹配电脑鼠标速度…", self.calibrate_speed, glyph="settings")
+        form = self.mode_controls[Mode.BRIDGE]["advanced"]
+        form.insertRow(1, self.calibrate_speed_button)
+        form.insertRow(2, self.speed_match_toggle)
+
+    def _toggle_speed_match(self, enabled):
+        key = "matched_speed" if enabled else "manual_speed"
+        default = 100 if enabled else 50
+        self.speed_control.setValue(bounded_int(self.preferences.get(key, default), default, 25, 150))
+        self.save_preferences()
+
+    def calibrate_speed(self):
+        s = self.runtime
+        if self.speed_wizard or s.busy_tool or s.release_blocked or self._closing or s.state in (State.ACTIVE, State.CONNECTING, State.STOPPING):
+            return
+        try:
+            dialog = SpeedWizard(self, previous_geometry=self.preferences.get("pointer_geometry"))
+        except (ImportError, OSError, RuntimeError) as error:
+            QMessageBox.warning(self, "速度校准无法打开", str(error))
+            return
+        self.speed_wizard = dialog
+        s.busy_tool = True
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.finished.connect(self._speed_wizard_finished)
+        dialog.open()
+        self.refresh()
+
+    def _speed_wizard_finished(self, result):
+        dialog, self.speed_wizard = self.speed_wizard, None
+        self.runtime.busy_tool = False
+        if result == SpeedWizard.DialogCode.Accepted and dialog.profile:
+            if not self.speed_match_toggle.isChecked():
+                self.preferences["manual_speed"] = self.speed_control.value()
+            self.pointer_profile = dict(dialog.profile)
+            self.preferences["pointer_geometry"] = dialog.geometry_settings
+            board = self.runtime.snapshot.get("device_serial") if self.runtime.owner == Mode.BRIDGE else None
+            if board:
+                self.pointer_profile["board_serial"] = board
+            self._has_profile_record = True
+            self.speed_match_toggle.blockSignals(True)
+            self.speed_match_toggle.setChecked(True)
+            self.speed_match_toggle.blockSignals(False)
+            self.speed_match_toggle.show()
+            self.top_hint.setText("鼠标速度校准已完成，开启键鼠控制后使用。")
+            if self.speed_control.value() == 100:
+                self.save_preferences()
+            else:
+                self.speed_control.setValue(100)
+        self.refresh()
+
+    def _show_display_side(self, side):
+        choice = self.display_side_choice
+        previous = choice.blockSignals(True)
+        try:
+            if side in ("left", "right"):
+                choice.setCurrentText("电脑左侧" if side == "left" else "电脑右侧")
+            else:
+                choice.clearSelection()
+        finally:
+            choice.blockSignals(previous)
+
+    def _choose_display_side(self, name):
+        if self._loading:
+            return
+        side = "left" if name == "电脑左侧" else "right"
+        self._display_move_error = ""
+        if self.runtime.owner == Mode.DISPLAY and self.runtime.state == State.ACTIVE:
+            self._display_move_pending = side
+            if self.runtime.request(Mode.DISPLAY, "set_display_side", {"display_side": side}):
+                return
+            self._display_move_pending = None
+            self._display_move_error = "暂时无法移动副屏，请等待连接稳定后重试。"
+            self._show_display_side(self.runtime.snapshot.get("display_side"))
+        else:
+            self.preferences["display_side"] = side
+            self.save_preferences()
+        self.refresh()
+
+    def _display_session_options(self):
+        options = self._quality_options()
+        side = self.preferences.get("display_side")
+        if side in ("left", "right"):
+            options["display_side"] = side
+        return options
+
+    def _quality_options(self):
+        name = self.quality_choice.currentText()
+        if name == "自定义":
+            return dict(fps=self.custom_fps, bitrate_mbps=self.custom_bitrate)
+        profile, bitrate = QUALITY_PRESETS[name]
+        return dict(profile=profile, fps=60, bitrate_mbps=bitrate)
+
+    def _quality_changed(self, _name):
+        if self._loading:
+            return
+        self.save_preferences()
+        self.runtime.reconnect_display(self._display_session_options())
 
     def _display_options(self):
         controls = self.mode_controls[Mode.DISPLAY]
@@ -132,16 +267,10 @@ class LiveHubWindow(HubWindow):
         if identity.startswith(("wifi:", "usb:")):
             identity = ""
         transport = {"自动": "auto", "USB": "usb", "Wi-Fi": "wifi"}[self.transport_choice.currentText()]
-        profile = {"均衡": "balanced", "清晰": "sharp", "流畅": "smooth"}[self.quality_choice.currentText()]
-        options = dict(target=selected.get("target", ""), device_id=identity,
-                    port=selected.get("port", 9000), transport=transport, profile=profile,
-                    fps=60, bitrate_mbps={"balanced": 30, "sharp": 45, "smooth": 15}[profile],
+        return dict(target=selected.get("target", ""), device_id=identity,
+                    port=selected.get("port", 9000), transport=transport, **self._display_session_options(),
                     preferred_device_id=identity if self.priority_choice.currentIndex() == 0 else "",
                     require_private_network=True)
-        if self.custom_quality.isChecked():
-            options.pop("profile")
-            options.update(fps=self.custom_fps, bitrate_mbps=self.custom_bitrate)
-        return options
 
     def save_preferences(self):
         if self._loading or not self.runtime:
@@ -152,9 +281,13 @@ class LiveHubWindow(HubWindow):
             speed=self.speed_control.value(), ipad_side=bridge["ipad_side"], bridge_mode=bridge["mode"],
             hotkey_return_enabled=bridge["hotkey_return_enabled"],
             transport=display["transport"], profile=display.get("profile", "custom"),
-            custom_fps=self.custom_fps, custom_bitrate=self.custom_bitrate,
+            custom_fps=self.custom_fps, custom_bitrate=self.custom_bitrate, has_custom_quality="自定义" in self.quality_choice.items,
             remember_device=self.priority_choice.currentIndex() == 0,
             selected_device=display["device_id"], selected_target=display["target"])
+        if self.pointer_profile:
+            enabled = self.speed_match_toggle.isChecked()
+            self.preferences.update(pointer_profile=self.pointer_profile, pointer_profile_enabled=enabled)
+            self.preferences["matched_speed" if enabled else "manual_speed"] = self.speed_control.value()
         try:
             self.storage.save_settings(self.preferences)
         except OSError as exc:
@@ -174,6 +307,9 @@ class LiveHubWindow(HubWindow):
         self._tool_after_stop = self._resolution_after_stop = None
         self.save_preferences()
         if mode == Mode.DISPLAY:
+            if self.runtime.can_retry_display:
+                self.runtime.reconnect_display(self._display_session_options(), retry=True)
+                return
             options = self._display_options()
             if not options["target"]:
                 self.discover(mode)
@@ -269,7 +405,9 @@ class LiveHubWindow(HubWindow):
         elif title.startswith("连接诊断"):
             snapshot = self.runtime.snapshot if self.runtime and self.runtime.owner == Mode.DISPLAY else {}
             details = self.runtime.detail if snapshot else "副屏后台尚未启动。请在 iPad 打开 OpenDisplay，再刷新设备。"
-            fields = [f"{k}：{snapshot[k]}" for k in ("transport", "width", "height", "fps", "failure") if k in snapshot]
+            fields = [f"{name}：{snapshot[key]}" for key, name in (("transport", "连接方式"), ("width", "宽度"),
+                ("height", "高度"), ("target_fps", "目标帧率"), ("target_bitrate_mbps", "目标码率（Mbps）"),
+                ("failure", "错误代码")) if key in snapshot]
             super().show_info("连接诊断", details + ("\n\n" + "\n".join(fields) if fields else "") + "\n\n副屏需要 Windows 虚拟显示驱动。可在 Windows 显示设置中检查；安装包不安装或替换驱动。")
         else:
             super().show_info(title, text)
@@ -283,7 +421,15 @@ class LiveHubWindow(HubWindow):
             self.runtime.request(Mode.BRIDGE, "calibrate", dict(self._bridge_options(), orientation="landscape" if direction == "横屏" else "portrait"))
 
     def _engine_event(self, mode, event, payload):
-        if event == "calibration":
+        if mode == Mode.DISPLAY and event == "response:set_display_side":
+            requested, self._display_move_pending = self._display_move_pending, None
+            if payload.get("ok") and requested:
+                self.preferences["display_side"] = requested
+                self.save_preferences()
+            elif requested:
+                self._display_move_error = payload.get("error") or "Windows 未能移动副屏，请重新选择位置。"
+                self._show_display_side(self.runtime.snapshot.get("display_side"))
+        elif event == "calibration":
             if payload.get("confirmation_required"):
                 answer = QMessageBox.question(self, "确认校准结果", "七个光标位置是否正确，并且边缘位置真正贴边？")
                 self.runtime.request(Mode.BRIDGE, "calibrate", dict(orientation=payload.get("orientation", "landscape"), confirmed=answer == QMessageBox.StandardButton.Yes))
@@ -301,6 +447,10 @@ class LiveHubWindow(HubWindow):
         if s.release_blocked:
             self._tool_after_stop = self._resolution_after_stop = None
         busy = s.state in (State.CONNECTING, State.STOPPING)
+        if s.changing_display_quality:
+            self._quality_reconnecting = True
+        elif s.owner != Mode.DISPLAY or s.state != State.CONNECTING:
+            self._quality_reconnecting = False
         for mode, c in self.mode_controls.items():
             relevant = mode == s.owner or mode == s.selected
             state = s.state if relevant else State.READY
@@ -310,7 +460,8 @@ class LiveHubWindow(HubWindow):
             if s.release_blocked:
                 state, detail = State.FAILED, s.detail
             if s.busy_tool:
-                detail = "设备工具正在使用开发板，请结束操作后再启动连接。"
+                detail = ("正在匹配电脑鼠标速度，完成后可启动连接。" if self.speed_wizard
+                          else "设备工具正在使用开发板，请结束操作后再启动连接。")
             c["title"].setText(state.value)
             c["title"].setProperty("tone", state.name.lower())
             c["title"].style().unpolish(c["title"])
@@ -319,29 +470,62 @@ class LiveHubWindow(HubWindow):
             c["progress"].setVisible(busy and relevant)
             c["start"].setEnabled(not busy and not s.busy_tool and not s.release_blocked and not self._closing and not (s.owner == mode and s.state == State.ACTIVE))
             c["start"].setText(("切换并连接副屏" if mode == Mode.DISPLAY else "切换并开始键鼠") if s.owner and s.owner != mode else ("连接副屏" if mode == Mode.DISPLAY else "开始键鼠控制"))
-            c["stop"].setText("取消" if s.state == State.CONNECTING else "停止")
-            c["stop"].setEnabled(s.engine is not None and not s.busy_tool and s.state != State.STOPPING)
+            if mode == Mode.DISPLAY and s.can_retry_display:
+                c["start"].setText("重试原副屏")
+            cancel_reconnect = mode == Mode.DISPLAY and s.changing_display_quality
+            c["stop"].setText("取消重连" if cancel_reconnect else ("取消" if s.state == State.CONNECTING else "停止"))
+            c["stop"].setEnabled(s.engine is not None and not s.busy_tool and (s.state != State.STOPPING or cancel_reconnect))
             c["recovery"].setVisible(s.release_blocked)
             c["device"].setEnabled(not busy and not s.busy_tool and s.state != State.ACTIVE)
+            if mode == Mode.DISPLAY and s.can_retry_display:
+                c["device"].setEnabled(False)
+                c["stop"].setEnabled(True)
         snapshot = s.snapshot if s.owner == Mode.BRIDGE else {}
         self.board_status.setText("USB：" + ("已连接" if snapshot.get("usb") else "未确认") + " · 蓝牙：" + ("已连接" if snapshot.get("ble") else "未确认") + " · 定位：" + ("就绪" if snapshot.get("ready") else "未确认"))
         active_busy = busy or s.state == State.ACTIVE or s.busy_tool or s.release_blocked
-        for field in (self.position_choice, self.speed_control, self.bridge_mode_choice, self.transport_choice, self.quality_choice):
+        for field in (self.position_choice, self.speed_control, self.bridge_mode_choice, self.transport_choice):
             field.setEnabled(not active_busy)
+        if s.can_retry_display:
+            self.transport_choice.setEnabled(False)
         if hasattr(self, "hotkey_toggle"):
             self.hotkey_toggle.setEnabled(not active_busy)
-        if hasattr(self, "custom_quality"):
-            self.custom_quality.setEnabled(not active_busy)
-            self.quality_choice.setEnabled(not active_busy and not self.custom_quality.isChecked())
+        if hasattr(self, "calibrate_speed_button"):
+            self.calibrate_speed_button.setEnabled(not active_busy and not self._closing)
+            self.speed_match_toggle.setEnabled(not active_busy and not self._closing)
+        self.quality_choice.setEnabled(not self._closing and not self._display_move_pending and not s.busy_tool and not s.release_blocked
+                                       and (not busy or s.changing_display_quality)
+                                       and (s.owner != Mode.DISPLAY or s.state != State.ACTIVE or s.has_display_endpoint))
+        hint = ""
+        if self._quality_reconnecting:
+            hint = f"正在以「{self.quality_choice.currentText()}」画质重新连接副屏…"
+        elif s.can_retry_display:
+            hint = "可重试原副屏，或点击停止后选择其他设备。"
+        elif s.owner == Mode.DISPLAY and s.state == State.ACTIVE:
+            hint = "切换画质会短暂中断画面，并自动重新连接。" if s.has_display_endpoint else "等待确认接收端地址后可切换画质。"
+            if "target_fps" in s.snapshot and "target_bitrate_mbps" in s.snapshot:
+                hint = f"当前目标 {s.snapshot['target_fps']} 帧 / {s.snapshot['target_bitrate_mbps']} Mbps。{hint}"
+        self.quality_hint.setText(hint)
+        self.quality_hint.setVisible(bool(hint))
         for b in getattr(self, "discovery_buttons", []):
-            b.setEnabled(not active_busy and not self._closing)
+            b.setEnabled(not active_busy and not self._closing and not s.can_retry_display)
         for b in self.tool_buttons:
             b.setEnabled(not busy and not s.busy_tool and not s.release_blocked and not self._closing)
         if hasattr(self, "manual_button"):
-            self.manual_button.setEnabled(not active_busy)
+            self.manual_button.setEnabled(not active_busy and not s.can_retry_display)
         if hasattr(self, "resolution_button"):
             self.resolution_button.setEnabled(not busy and not s.busy_tool and not s.release_blocked and not self._closing)
-        self.footer.setText(f"{NAMES[s.owner] if s.owner else '无活动用途'} · {s.state.value}  |  iPadHub 0.1.0-preview")
+        if s.owner != Mode.DISPLAY or s.state != State.ACTIVE:
+            self._display_move_pending = None
+            self._display_move_error = ""
+            self._show_display_side(self.preferences.get("display_side"))
+        elif not self._display_move_pending and "display_side" in s.snapshot:
+            self._show_display_side(s.snapshot["display_side"])
+        self.display_side_choice.setEnabled(not (self._closing or busy or s.release_blocked
+                                                or s.busy_tool or self._display_move_pending))
+        placement_error = self._display_move_error or (s.snapshot.get("display_side_error", "") if s.owner == Mode.DISPLAY else "")
+        if placement_error:
+            self.mode_controls[Mode.DISPLAY]["detail"].setText(placement_error)
+        self.footer.setText(f"{NAMES[s.owner] if s.owner else '无活动用途'} · {s.state.value}  |  iPadHub {__version__}")
 
     def demo_tool(self, title):
         if self.runtime.busy_tool:
@@ -450,6 +634,8 @@ class LiveHubWindow(HubWindow):
     def quit_app(self):
         if self.runtime is None:
             return super().quit_app()
+        if self.speed_wizard is not None:
+            self.speed_wizard.reject()
         if self.resolution_task is not None:
             self._quit_after_tool = True
             self.top_hint.setText("分辨率配置结束后会自动退出。")

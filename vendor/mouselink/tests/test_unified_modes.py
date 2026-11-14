@@ -32,13 +32,13 @@ class UnifiedModeTests(unittest.TestCase):
                     self.assertEqual(c._pointer.x, x)
                     self.assertIsNone(c._pointer.edge_sent_at)
                     seq = c._sequence
-                    ack_time = time.monotonic()
+                    ack_time = time.perf_counter()
                     c._bridge.status = Status(ack_sequence=seq, ack_accepted=True,
                                               ack_x=x, ack_y=16384, ack_at=ack_time)
                     c._confirm_absolute_edge()
                     c._handle_raw_mouse_move(dx, 0)
                     self.assertFalse(c._exit_requested)
-                    with patch("bridge.time.monotonic", return_value=ack_time + .2):
+                    with patch("bridge.time.perf_counter", return_value=ack_time + .2):
                         c._handle_raw_mouse_move(dx, 0)
                     self.assertTrue(c._exit_requested)
 
@@ -47,7 +47,7 @@ class UnifiedModeTests(unittest.TestCase):
             with self.subTest(side=side):
                 c = self.controller("locked", side)
                 c._pointer.x = x
-                c._pointer.sent(x, 16384, time.monotonic() - 1, True)
+                c._pointer.sent(x, 16384, time.perf_counter() - 1, True)
                 c._handle_raw_mouse_move(dx, 0)
                 self.assertFalse(c._exit_requested)
 

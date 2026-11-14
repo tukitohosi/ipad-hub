@@ -165,6 +165,14 @@ void SenderApp::Start(std::string ip, uint16_t port, StreamSettings settings,
         worker_.join();
 
     stopRequested_ = false;
+#ifdef IPADHUB_ENGINE
+    {
+        std::lock_guard<std::mutex> lock(layoutMutex_);
+        requestedSide_ = settings.displaySide;
+        confirmedSide_.clear();
+        layoutError_.clear();
+    }
+#endif
     {
         std::lock_guard<std::mutex> lock(statusMutex_);
         networkDrops_ = 0;
@@ -330,8 +338,20 @@ void SenderApp::PublishPipelineTimings(const CaptureTimings& capture, const Enco
 
 ConnectionSnapshot SenderApp::Snapshot() const
 {
+#ifdef IPADHUB_ENGINE
+    std::lock_guard<std::mutex> layoutLock(layoutMutex_);
+#endif
     std::lock_guard<std::mutex> lock(statusMutex_);
     ConnectionSnapshot snapshot;
+#ifdef IPADHUB_ENGINE
+    const auto now = std::chrono::steady_clock::now();
+    if (layoutDisplay_ && now >= nextSideRead_) {
+        confirmedSide_ = layoutDisplay_->CurrentSide();
+        nextSideRead_ = now + std::chrono::seconds(1);
+    }
+    snapshot.displaySide = confirmedSide_;
+    snapshot.displaySideError = layoutError_;
+#endif
     snapshot.phase = phase_;
     snapshot.failure = failure_;
     snapshot.detail = failureDetail_;
@@ -361,6 +381,23 @@ ConnectionSnapshot SenderApp::Snapshot() const
     }
     return snapshot;
 }
+
+#ifdef IPADHUB_ENGINE
+bool SenderApp::SetDisplaySide(const std::string& side, std::string& error)
+{
+    std::lock_guard<std::mutex> lock(layoutMutex_);
+    if (!layoutDisplay_) { error = "iPad 副屏尚未就绪"; return false; }
+    if (!layoutDisplay_->PlaceOnSide(side == "left", error)) {
+        layoutError_ = error;
+        return false;
+    }
+    requestedSide_ = confirmedSide_ = side;
+    nextSideRead_ = {};
+    layoutError_.clear();
+    PublishMonitorRect(layoutDisplay_->MonitorRect());
+    return true;
+}
+#endif
 
 void SenderApp::RunLoop(std::string ip, uint16_t port, StreamSettings settings,
                         std::string expectedDeviceId, std::string transport)
@@ -409,6 +446,13 @@ void SenderApp::RunLoop(std::string ip, uint16_t port, StreamSettings settings,
     // would be released after CoUninitialize(), an access violation on Stop().
     H264Encoder encoder;
     VirtualDisplay vdisp;
+#ifdef IPADHUB_ENGINE
+    struct UnpublishLayout {
+        std::mutex& mutex;
+        VirtualDisplay*& display;
+        ~UnpublishLayout() { std::lock_guard<std::mutex> lock(mutex); display = nullptr; }
+    } unpublish{layoutMutex_, layoutDisplay_};
+#endif
     DesktopDuplication dup;
     InputInjector input;
     std::mutex pipelineMutex;
@@ -441,6 +485,14 @@ void SenderApp::RunLoop(std::string ip, uint16_t port, StreamSettings settings,
         dup.Close();
         std::wstring deviceName = settings.existingDisplayName;
         if (managedDisplay) {
+#ifdef IPADHUB_ENGINE
+            {
+                std::lock_guard<std::mutex> layoutLock(layoutMutex_);
+                layoutDisplay_ = nullptr;
+                confirmedSide_.clear();
+                layoutError_.clear();
+            }
+#endif
             // Encoding cadence is configurable, but Parsec's registered custom
             // modes in this product are 60 Hz. Requesting the encode FPS as a
             // display refresh (for example 30/120) produces BADMODE because
@@ -452,6 +504,13 @@ void SenderApp::RunLoop(std::string ip, uint16_t port, StreamSettings settings,
                 return false;
             }
             deviceName = vdisp.DeviceName();
+#ifdef IPADHUB_ENGINE
+            std::lock_guard<std::mutex> layoutLock(layoutMutex_);
+            layoutDisplay_ = &vdisp;
+            nextSideRead_ = {};
+            if (!requestedSide_.empty() && vdisp.PlaceOnSide(requestedSide_ == "left", layoutError_))
+                confirmedSide_ = requestedSide_;
+#endif
         } else if (!FindAttachedDisplay(deviceName)) {
             Logf(ip, "existing display %ls is not attached\n", deviceName.c_str());
             PublishStatus(ConnectionPhase::Failed, FailureReason::CaptureUnavailable,
@@ -497,6 +556,13 @@ void SenderApp::RunLoop(std::string ip, uint16_t port, StreamSettings settings,
                 }
             }
         }
+#ifdef IPADHUB_ENGINE
+        {
+            std::lock_guard<std::mutex> layoutLock(layoutMutex_);
+            layoutDisplay_ = nullptr;
+            confirmedSide_.clear();
+        }
+#endif
         vdisp.Close();
         PublishMonitorRect({});
         PublishDisplayName({});

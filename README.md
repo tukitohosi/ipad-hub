@@ -6,9 +6,19 @@
 
 用 USB 或 Wi-Fi 将 iPad 作为电脑副屏，也可以通过 ESP32-C3 开发板，用电脑键鼠操作 iPad 自身的应用。
 
-当前版本为 **0.1.0-preview**。[下载](https://github.com/tukitohosi/ipad-hub/releases/tag/v0.1.0-preview) · [使用说明](docs/使用说明.md)
+当前版本为 **0.1.1-preview**。[下载](https://github.com/tukitohosi/ipad-hub/releases/tag/v0.1.1-preview) · [使用说明](docs/使用说明.md)
 
 ![iPadHub 界面预览](docs/images/home-preview.png)
+
+截图为隔离交互预览，不包含真实设备信息。
+
+## 0.1.1-preview 更新
+
+- “iPad 副屏”页可在连接方式下选择电脑左侧或右侧，独立于键鼠控制的进入边缘；本机真机拖窗验证通过。
+- 一键画质为流畅 15、均衡 30、清晰 45 Mbps，均以 60 帧为目标；保留原自定义设置，连接中改档会重连同一台 iPad。实际 Wi-Fi 会话使用自定义 60 帧 / 100 Mbps 配置，这不代表实测达到该帧率或码率。
+- 键鼠采集与发送分离，新增慢、正常、快三档鼠标速度向导。**本轮试用的匹配手感仍未达到预期，10% 物理距离误差目标尚未验证**；向导按试验功能提供。
+
+详细检查范围与限制见 [本次发行说明](docs/releases/0.1.1-preview.md)。
 
 ## 主要功能
 
@@ -22,13 +32,13 @@
 
 ## 下载与安装
 
-在 [发布页](https://github.com/tukitohosi/ipad-hub/releases/tag/v0.1.0-preview) 选择：
+在 [发布页](https://github.com/tukitohosi/ipad-hub/releases/tag/v0.1.1-preview) 选择：
 
-- iPadHub-0.1.0-preview-Setup-x64.exe：Windows x64 安装版。
-- iPadHub-0.1.0-preview-Windows-x64.zip：便携版，完整解压后打开 iPadHub.exe。
-- iPadHub-0.1.0-preview-source.zip：与本次发布程序对应的源码。
+- iPadHub-0.1.1-preview-Setup-x64.exe：Windows x64 安装版。
+- iPadHub-0.1.1-preview-Windows-x64.zip：便携版，完整解压后打开 iPadHub.exe。
+- iPadHub-0.1.1-preview-source.zip：与本次发布程序对应的源码。
 
-副屏驱动和 iPad 接收端需要单独安装，安装器不修改防火墙。发布页同时提供文件校验清单。
+安装包未签名。副屏驱动和 iPad 接收端需要单独安装，安装器不修改防火墙。发布页同时提供 SHA-256 校验清单。
 
 ## 使用与数据
 
@@ -45,6 +55,6 @@
 
 ## 开发与许可
 
-源码包含统一界面、MouseLink 键鼠后台和 iPad互联副屏后台。构建方式见 [构建说明](docs/packaging.md)。
+源码包含统一界面、MouseLink 键鼠后台和 iPad互联副屏后台。构建方式见 [构建说明](docs/packaging.md)。对应二进制的准确源码以 Release 的 `iPadHub-0.1.1-preview-source.zip` 为准；仓库另包含发布时更新的说明。
 
 项目按 [GPL-3.0](LICENSE) 提供对应源码，各组件保留原有许可。详见 [第三方声明](THIRD_PARTY_NOTICES.md)。

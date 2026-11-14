@@ -36,13 +36,13 @@ class FakeEngine(QObject):
         self.sent.append((request, command, payload or {}))
         return request
 
-    def event(self, name, payload):
+    def emit_event(self, name, payload):
         self.message.emit(dict(v=1, session=self.session, request="", type="event",
                                event=name, payload=payload))
 
     def release(self):
         self.released = True
-        self.event("released", {"clean": True, "released": True})
+        self.emit_event("released", {"clean": True, "released": True})
 
     def exit(self, normal=True):
         clean = self.released and normal
@@ -68,7 +68,7 @@ class RuntimeTests(unittest.TestCase):
     def active(self, mode):
         self.assertTrue(self.controller.request(mode, "start", {"target": "test"}))
         engine = self.controller.engine
-        engine.event("status", {"state": "active", "running": True, "detail": "ready"})
+        engine.emit_event("status", {"state": "active", "running": True, "detail": "ready"})
         return engine
 
     def test_fifty_roundtrips_wait_for_release_and_exit(self):
@@ -90,7 +90,7 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(self.controller.owner, mode)
                 self.assertTrue(new.started)
                 self.assertEqual(new.sent[0][1], "start")
-                new.event("status", {"state": "active", "detail": "active"})
+                new.emit_event("status", {"state": "active", "detail": "active"})
                 old = new
         self.assertEqual(len(self.engines), 101)
 
@@ -109,13 +109,35 @@ class RuntimeTests(unittest.TestCase):
         self.controller.request(Mode.BRIDGE, "start")
         engine = self.controller.engine
         self.controller.stop()
-        engine.event("status", {"state": "active", "detail": "late"})
+        engine.emit_event("status", {"state": "active", "detail": "late"})
         self.assertEqual(self.controller.state, State.STOPPING)
         engine.release()
         engine.exit()
-        engine.event("status", {"state": "active", "detail": "stale"})
+        engine.emit_event("status", {"state": "active", "detail": "stale"})
         self.assertEqual(self.controller.state, State.READY)
         self.assertIsNone(self.controller.engine)
+
+    def test_failed_display_quality_reconnect_preserves_release_failure(self):
+        engine = self.active(Mode.DISPLAY)
+        self.assertFalse(self.controller.reconnect_display(dict(profile="sharp", fps=60, bitrate_mbps=45)))
+        engine.emit_event("status", dict(state="active", device_id="iPad", connected_target="192.168.1.27",
+                                       connected_port=9200, transport="wifi"))
+        self.assertTrue(self.controller.reconnect_display(dict(profile="sharp", fps=60, bitrate_mbps=45)))
+        engine.exit(normal=False)
+        self.assertEqual(len(self.engines), 1)
+        self.assertEqual(self.controller.state, State.FAILED)
+        self.assertTrue(self.controller.release_blocked)
+        self.assertFalse(self.controller.reconnect_display(dict(fps=60, bitrate_mbps=100)))
+
+    def test_failed_first_start_with_live_process_retries_after_waiting_for_exit(self):
+        self.controller.request(Mode.DISPLAY, "start", {"target": "first"})
+        engine = self.engines[0]
+        engine.emit_event("status", {"state": "missing", "running": True})
+        self.controller.request(Mode.DISPLAY, "start", {"target": "selected"})
+        self.assertEqual([command for _, command, _ in engine.sent], ["start", "shutdown"])
+        engine.release()
+        engine.exit()
+        self.assertEqual(self.engines[-1].sent[0][1:], ("start", {"target": "selected"}))
 
     def test_release_failure_blocks_all_new_modes(self):
         engine = self.active(Mode.BRIDGE)
@@ -149,7 +171,7 @@ class RuntimeTests(unittest.TestCase):
         engine.fault.emit("pipe failed")
         self.assertTrue(self.controller.release_blocked)
         self.assertIsNone(self.controller.pending)
-        engine.event("status", {"state": "ready", "detail": "late"})
+        engine.emit_event("status", {"state": "ready", "detail": "late"})
         self.assertEqual(self.controller.state, State.FAILED)
         self.assertEqual(self.controller.detail, "pipe failed")
 
@@ -159,8 +181,8 @@ class RuntimeTests(unittest.TestCase):
         old.release()
         old.exit()
         current = self.controller.engine
-        current.event("status", {"state": "active", "detail": "current"})
-        old.event("status", {"state": "failed", "detail": "stale"})
+        current.emit_event("status", {"state": "active", "detail": "current"})
+        old.emit_event("status", {"state": "failed", "detail": "stale"})
         old.fault.emit("old pipe disconnected")
         old.exit(normal=False)
         self.assertIs(self.controller.engine, current)

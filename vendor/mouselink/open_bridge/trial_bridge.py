@@ -50,6 +50,11 @@ class TrialController(KVMController):
             self.trace.record("raw", dx=delta_x, dy=delta_y)
         return super()._handle_raw_mouse_move(delta_x, delta_y)
 
+    def _record_mouse_input(self, inbox, delta_x, delta_y, device):
+        if self.trace and self._is_active and not self._exit_requested:
+            self.trace.record("raw", dx=delta_x, dy=delta_y)
+        return super()._record_mouse_input(inbox, delta_x, delta_y, device)
+
     def _release_all_remote_inputs(self):
         if self.trace:
             self.trace.record("input_release", reason=self._exit_reason)
@@ -68,8 +73,9 @@ class TrialController(KVMController):
 
     def _flush_native_mouse(self, force=False):
         before = self._native_state()
-        super()._flush_native_mouse(force)
+        sent = super()._flush_native_mouse(force)
         self._record_transition(before, "input")
+        return sent
 
     def _confirm_absolute_edge(self):
         before = self._native_state()

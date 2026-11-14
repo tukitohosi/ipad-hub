@@ -9,9 +9,10 @@ from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QPushButton, QSystemTrayIcon
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QPushButton, QSystemTrayIcon, QWidget
 
 from ipadhub.live_window import LiveHubWindow
 from ipadhub.model import Mode, State
@@ -39,13 +40,13 @@ class FakeEngine(QObject):
         self.sent.append((request, command, payload or {}))
         return request
 
-    def event(self, event, payload):
+    def emit_event(self, event, payload):
         self.message.emit(dict(v=1, session=self.session, request="", type="event",
                                event=event, payload=payload))
 
     def release(self):
         self.released = True
-        self.event("released", {"clean": True})
+        self.emit_event("released", {"clean": True})
 
     def exit(self):
         self.finished.emit(self.released, "" if self.released else "unconfirmed release")
@@ -98,7 +99,7 @@ class LiveWindowTests(unittest.TestCase):
     def board_ready(self, window):
         window.discover(Mode.BRIDGE)
         engine = window.runtime.engine
-        engine.event("status", {"state": "ready", "ready": True, "usb": True, "ble": True,
+        engine.emit_event("status", {"state": "ready", "ready": True, "usb": True, "ble": True,
                                 "running": False, "detail": "ready"})
         return engine
 
@@ -126,6 +127,54 @@ class LiveWindowTests(unittest.TestCase):
         self.assertEqual(window.speed_control.value(), 50)
         self.assertEqual(self.engines, [])
 
+    def test_display_position_is_below_transport_and_independent_from_bridge(self):
+        self.storage.save_settings({"ipad_side": "left"})
+        window = self.make_window()
+        home = window.pages.widget(0).widget()
+        self.assertFalse(any(w.accessibleName() in ("键鼠跨屏位置", "副屏位置") for w in home.findChildren(QWidget)))
+        form = window.mode_controls[Mode.DISPLAY]["form"]
+        display = window.display_side_choice
+        self.assertEqual(form.getWidgetPosition(display)[0], form.getWidgetPosition(window.transport_choice)[0] + 1)
+        self.assertEqual(display.currentText(), "")
+        self.assertNotIn("display_side", window._display_options())
+        display.buttons[1].click()
+        self.assertEqual(self.storage.load_settings()["display_side"], "right")
+        self.assertEqual(window._display_options()["display_side"], "right")
+        self.assertEqual(window._bridge_options()["ipad_side"], "left")
+        self.assertNotIn("display_side", window._bridge_options())
+        self.assertFalse(self.engines)
+        self.assertEqual(self.make_window().display_side_choice.currentText(), "电脑右侧")
+
+    def test_live_display_move_applies_without_restarting_and_recovers_on_failure(self):
+        window = self.make_window()
+        window._devices_found(Mode.DISPLAY, [dict(id="screen", target="192.168.1.8", transport="wifi")])
+        window.start_session(Mode.DISPLAY)
+        engine = self.engines[-1]
+        status = dict(state="active", transport="wifi", device_id="screen", connected_target="192.168.1.8",
+                      connected_port=9000, display_side="right")
+        engine.emit_event("status", status)
+        display = window.display_side_choice
+        self.assertEqual(display.currentText(), "电脑右侧")
+        display.buttons[0].click()
+        request, command, options = engine.sent[-1]
+        self.assertEqual((command, options), ("set_display_side", {"display_side": "left"}))
+        self.assertFalse(display.isEnabled())
+        engine.message.emit(dict(type="response", request=request, ok=False, error="布局被 Windows 拒绝", payload={}))
+        self.assertEqual(window.runtime.state, State.ACTIVE)
+        self.assertEqual(display.currentText(), "电脑右侧")
+        self.assertIn("Windows", window.mode_controls[Mode.DISPLAY]["detail"].text())
+        self.assertNotIn("display_side", self.storage.load_settings())
+        display.buttons[0].click()
+        engine.message.emit(dict(type="response", request=engine.sent[-1][0], ok=True, payload={"display_side":"left"}))
+        engine.emit_event("status", dict(status, display_side="left"))
+        self.assertTrue(display.isEnabled())
+        self.assertEqual(display.currentText(), "电脑左侧")
+        self.assertEqual(self.storage.load_settings()["display_side"], "left")
+        self.assertNotIn("shutdown", [entry[1] for entry in engine.sent])
+        self.assertEqual(window._bridge_options()["ipad_side"], "right")
+        window.quality_choice.buttons[1].click()
+        self.assertEqual(window.runtime.pending[2]["display_side"], "left")
+
     def test_valid_json_with_null_devices_recovers_without_blocking_startup(self):
         self.storage.save_json(self.storage.display_dir / "config.json", {"devices": None})
         window = self.make_window()
@@ -149,6 +198,7 @@ class LiveWindowTests(unittest.TestCase):
 
     def test_display_start_sends_profile_transport_and_stable_identity(self):
         window = self.make_window()
+        self.assertEqual(window.quality_choice.items, ["均衡", "清晰", "流畅"])
         window._devices_found(Mode.DISPLAY, [{"id": "wifi:192.168.1.5", "receiver_id": "stable-iPad",
             "target": "192.168.1.5", "port": 9011, "transport": "wifi", "name": "iPad"}])
         window.transport_choice.setCurrentText("Wi-Fi")
@@ -165,7 +215,7 @@ class LiveWindowTests(unittest.TestCase):
         self.storage.save_json(self.storage.display_dir / "config.json",
                                {"streamProfile": 3, "fps": 90, "bitrateMbps": 62})
         window = self.make_window()
-        self.assertTrue(window.custom_quality.isChecked())
+        self.assertEqual(window.quality_choice.currentText(), "自定义")
         options = window._display_options()
         self.assertNotIn("profile", options)
         self.assertEqual(options["fps"], 90)
@@ -176,10 +226,76 @@ class LiveWindowTests(unittest.TestCase):
         self.assertEqual(saved["custom_fps"], 90)
         self.assertEqual(saved["custom_bitrate"], 62)
         reopened = self.make_window()
-        self.assertTrue(reopened.custom_quality.isChecked())
+        self.assertEqual(reopened.quality_choice.currentText(), "自定义")
         self.assertEqual(reopened._display_options()["fps"], 90)
         self.assertEqual(reopened._display_options()["bitrate_mbps"], 62)
         self.assertNotIn("profile", reopened._display_options())
+
+    def test_imported_numeric_quality_switches_by_click_and_can_be_restored_after_restart(self):
+        self.storage.save_json(self.storage.display_dir / "config.json", {"fps": 60, "bitrateMbps": 100})
+        window = self.make_window()
+        window.navigate(1)
+        window.show()
+        self.app.processEvents()
+        choice = window.quality_choice
+        self.assertEqual(choice.currentText(), "自定义")
+        for label, name, bitrate in (("均衡", "balanced", 30), ("清晰", "sharp", 45), ("流畅", "smooth", 15)):
+            QTest.mouseClick(choice.buttons[choice.items.index(label)], Qt.MouseButton.LeftButton)
+            self.assertEqual(choice.currentText(), label)
+            self.assertEqual(self.storage.load_settings()["profile"], name)
+            self.assertEqual(window._quality_options(), dict(profile=name, fps=60, bitrate_mbps=bitrate))
+        reopened = self.make_window()
+        self.assertEqual(reopened.quality_choice.currentText(), "流畅")
+        reopened.quality_choice.buttons[-1].click()
+        self.assertEqual(reopened._quality_options(), dict(fps=60, bitrate_mbps=100))
+        self.assertEqual(self.storage.load_settings()["profile"], "custom")
+
+    def test_active_display_quality_reconnects_only_after_clean_exit_to_same_device(self):
+        window = self.make_window()
+        window.navigate(1)
+        window.show()
+        self.app.processEvents()
+        window._devices_found(Mode.DISPLAY, [dict(id="wifi:192.168.1.9", target="192.168.1.9", transport="wifi", name="One"),
+                                            dict(id="usb:one", target="usb:one", transport="usb", name="Two")])
+        window.transport_choice.setCurrentText("自动")
+        window.start_session(Mode.DISPLAY)
+        original = self.engines[0]
+        self.assertEqual((original.sent[0][2]["target"], original.sent[0][2]["transport"]), ("192.168.1.9", "auto"))
+        endpoint = dict(device_id="confirmed", connected_target="usb:one", connected_port=9102, transport="usb")
+        original.emit_event("status", dict(state="active", target_fps=60, target_bitrate_mbps=30, **endpoint))
+        self.assertIn("自动重新连接", window.quality_hint.text())
+        window._devices_found(Mode.DISPLAY, [dict(id="different", target="usb:two", transport="usb", name="Two")])
+        for index in (1, 2):
+            QTest.mouseClick(window.quality_choice.buttons[index], Qt.MouseButton.LeftButton)
+        self.assertIn("流畅", window.quality_hint.text())
+        self.assertEqual([cmd for _, cmd, _ in original.sent], ["start", "shutdown"])
+        original.release()
+        self.assertEqual(len(self.engines), 1)
+        original.exit()
+        self.assertIn("流畅", window.quality_hint.text())
+        self.assertEqual(len(self.engines), 2)
+        _, command, options = self.engines[-1].sent[0]
+        self.assertEqual((command, options["profile"], options["bitrate_mbps"]), ("start", "smooth", 15))
+        self.assertTrue(options["exact_endpoint"])
+        self.assertEqual((options["device_id"], options["target"], options["transport"], options["port"]), ("confirmed", "usb:one", "usb", 9102))
+        failed = self.engines[-1]
+        failed.emit_event("status", dict(state="failed", running=True, detail="原副屏暂不可用"))
+        self.assertFalse(window.mode_controls[Mode.DISPLAY]["device"].isEnabled())
+        retry = window.mode_controls[Mode.DISPLAY]["start"]
+        self.assertEqual(retry.text(), "重试原副屏")
+        QTest.mouseClick(retry, Qt.MouseButton.LeftButton)
+        self.assertEqual([cmd for _, cmd, _ in failed.sent], ["start", "shutdown"])
+        failed.release()
+        failed.exit()
+        self.assertEqual(len(self.engines), 3)
+        self.assertEqual(self.engines[-1].sent[0][2], options)
+        self.engines[-1].emit_event("status", dict(state="active", target_fps=60, target_bitrate_mbps=15, **endpoint))
+        self.assertIn("15 Mbps", window.quality_hint.text())
+        window.quality_choice.buttons[0].click()
+        window.mode_controls[Mode.DISPLAY]["stop"].click()
+        self.engines[-1].release()
+        self.engines[-1].exit()
+        self.assertEqual(len(self.engines), 3)
 
     def test_remembered_stable_receiver_is_selected_after_dhcp_address_changes(self):
         self.storage.save_settings({"remember_device": True, "selected_device": "stable-A",
@@ -287,6 +403,8 @@ class LiveWindowTests(unittest.TestCase):
         self.assertEqual(self.engines, [])
 
     def test_all_pages_fit_minimum_width_with_long_device_names_and_advanced_settings(self):
+        self.storage.save_json(self.storage.display_dir / "config.json",
+                               {"streamProfile": 3, "fps": 120, "bitrateMbps": 100})
         window = self.make_window()
         long_name = "设计工作室会议室备用超长中文设备名称 " * 8
         window._devices_found(Mode.DISPLAY, [dict(name=long_name, id="stable", target="192.168.1.8", transport="wifi")])

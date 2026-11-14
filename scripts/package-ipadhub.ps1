@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$')]
-    [string]$Version = '0.1.0-preview',
+    [string]$Version = '0.1.1-preview',
     [string]$IsccPath,
     [switch]$SkipDisplayBuild,
     [switch]$SkipInstaller

@@ -148,6 +148,8 @@ public:
     bool closing = false;
     bool started = false;
     bool everStreaming = false;
+    bool exactEndpoint = false;
+    std::string displaySide;
     bool settingsDirty = false;
     std::string lastStatus;
     std::string forcedFailure;
@@ -298,6 +300,11 @@ public:
         return O({{"state", S(state)}, {"detail", S(detail)}, {"running", B(sender.IsRunning())},
             {"receiver_ready", B(snapshot.phase == od::ConnectionPhase::Streaming)},
             {"transport", S(transport)}, {"device_id", S(snapshot.deviceId)},
+            {"connected_target", S(snapshot.connectedAddress)},
+            {"connected_port", N(!snapshot.connectedAddress.empty() && attemptIndex < attempts.size() ? attempts[attemptIndex].port : 0)},
+            {"target_fps", N(transport == "usb" ? std::min(config.fps, 60u) : config.fps)},
+            {"target_bitrate_mbps", N(config.bitrateMbps)},
+            {"display_side", S(snapshot.displaySide)}, {"display_side_error", S(snapshot.displaySideError)},
             {"width", N(snapshot.width)}, {"height", N(snapshot.height)},
             {"failure", N(static_cast<int64_t>(snapshot.failure))}, {"attempt", N(attemptIndex + 1)},
             {"settings_saved", B(!settingsDirty)}});
@@ -314,8 +321,16 @@ public:
             else if (profile == "smooth") { proposed.streamProfile = od::StreamProfile::LowBandwidth; proposed.fps = 60; proposed.bitrateMbps = 15; }
             else { error = "未知画质预设"; return false; }
         }
-        if (IntField(payload, "fps", number)) { if (number < 30 || number > 120) { error = "帧率必须在 30 到 120 之间"; return false; } proposed.fps = static_cast<uint32_t>(number); }
-        if (IntField(payload, "bitrate_mbps", number)) { if (number < 5 || number > 100) { error = "码率必须在 5 到 100 Mbps 之间"; return false; } proposed.bitrateMbps = static_cast<uint32_t>(number); }
+        if (IntField(payload, "fps", number)) {
+            if (number < 30 || number > 120) { error = "帧率必须在 30 到 120 之间"; return false; }
+            proposed.fps = static_cast<uint32_t>(number);
+            if (profile.empty()) proposed.streamProfile = od::StreamProfile::Custom;
+        }
+        if (IntField(payload, "bitrate_mbps", number)) {
+            if (number < 5 || number > 100) { error = "码率必须在 5 到 100 Mbps 之间"; return false; }
+            proposed.bitrateMbps = static_cast<uint32_t>(number);
+            if (profile.empty()) proposed.streamProfile = od::StreamProfile::Custom;
+        }
         if (IntField(payload, "port", number)) { if (number < 1 || number > 65535) { error = "端口无效"; return false; } proposed.port = static_cast<uint16_t>(number); }
         BoolField(payload, "require_private_network", proposed.requirePrivateNetwork);
         BoolField(payload, "auto_reconnect", proposed.autoReconnect);
@@ -327,31 +342,8 @@ public:
         return true;
     }
 
-    bool Start(const Json::Object& payload, std::string& error) {
-        if (noDevice) { error = "no-device 检查模式禁止连接硬件"; return false; }
-        if (started || sender.IsRunning()) { error = "副屏已启动；请先停止当前会话"; return false; }
-        auto target = StringField(payload, "target");
-        auto id = StringField(payload, "device_id");
-        const auto mode = StringField(payload, "transport");
-        if (!mode.empty() && mode != "auto" && mode != "usb" && mode != "wifi") { error = "连接方式无效"; return false; }
-        uint16_t port = config.port;
-        int64_t requestedPort = 0;
-        if (IntField(payload, "port", requestedPort)) { if (requestedPort < 1 || requestedPort > 65535) { error = "端口无效"; return false; } port = static_cast<uint16_t>(requestedPort); }
-        if (target.size() > 512 || target.find_first_of("\r\n\t /\\") != std::string::npos) { error = "请输入有效的设备地址"; return false; }
-        if (!od::IsUsbMuxTarget(target)) {
-            auto colon = target.find(':');
-            if (colon != std::string::npos) {
-                const auto part = std::string_view(target).substr(colon + 1);
-                unsigned value = 0; auto parsed = std::from_chars(part.data(), part.data() + part.size(), value);
-                if (parsed.ec != std::errc{} || parsed.ptr != part.data() + part.size() || value == 0 || value > 65535) { error = "地址端口格式无效"; return false; }
-                port = static_cast<uint16_t>(value); target.resize(colon);
-            }
-            if (!target.empty() && !std::all_of(target.begin(), target.end(), [](unsigned char c) { return std::isalnum(c) || c == '.' || c == '-'; })) { error = "请输入 IPv4 地址或本地设备主机名"; return false; }
-        }
-        if ((mode == "wifi" && od::IsUsbMuxTarget(target)) || (mode == "usb" && !target.empty() && !od::IsUsbMuxTarget(target))) { error = "所选设备与连接方式不匹配"; return false; }
-        if (!Configure(payload, error)) return false;
+    void AddConnectionAttempts(const std::string& target, std::string id, const std::string& mode, uint16_t port) {
         if (id.starts_with("wifi:") || id.starts_with("usb:")) id.clear();
-        attempts.clear(); attemptIndex = 0; fallbackStopping = false;
         std::vector<Attempt> wifiAttempts;
         if (!target.empty() && !od::IsUsbMuxTarget(target)) {
             od::DeviceConfig device; device.id = id; device.lastIpv4 = target; device.port = port;
@@ -381,6 +373,47 @@ public:
         if (mode != "wifi" && preferUsb && !usbTarget.empty()) attempts.push_back({usbTarget, id, "usb", port, {usbTarget}});
         if (mode != "usb") attempts.insert(attempts.end(), wifiAttempts.begin(), wifiAttempts.end());
         if (mode != "wifi" && !preferUsb && !usbTarget.empty()) attempts.push_back({usbTarget, id, "usb", port, {usbTarget}});
+    }
+
+    bool Start(const Json::Object& payload, std::string& error) {
+        if (started || sender.IsRunning()) { error = "副屏已启动；请先停止当前会话"; return false; }
+        auto target = StringField(payload, "target");
+        const auto id = StringField(payload, "device_id");
+        const auto mode = StringField(payload, "transport");
+        const auto side = StringField(payload, "display_side");
+        if (Field(payload, "display_side") && side != "left" && side != "right") {
+            error = "副屏位置必须为 left 或 right"; return false;
+        }
+        bool exact = false;
+        BoolField(payload, "exact_endpoint", exact);
+        if (exact && (target.empty() || (mode != "usb" && mode != "wifi") || !Field(payload, "port"))) {
+            error = "无法确定原副屏连接，请重新选择设备"; return false;
+        }
+        if (!mode.empty() && mode != "auto" && mode != "usb" && mode != "wifi") { error = "连接方式无效"; return false; }
+        uint16_t port = config.port;
+        int64_t requestedPort = 0;
+        if (Field(payload, "port")) {
+            if (!IntField(payload, "port", requestedPort) || requestedPort < 1 || requestedPort > 65535) { error = "端口无效"; return false; }
+            port = static_cast<uint16_t>(requestedPort);
+        }
+        if (target.size() > 512 || target.find_first_of("\r\n\t /\\") != std::string::npos) { error = "请输入有效的设备地址"; return false; }
+        if (!od::IsUsbMuxTarget(target)) {
+            auto colon = target.find(':');
+            if (colon != std::string::npos) {
+                const auto part = std::string_view(target).substr(colon + 1);
+                unsigned value = 0; auto parsed = std::from_chars(part.data(), part.data() + part.size(), value);
+                if (parsed.ec != std::errc{} || parsed.ptr != part.data() + part.size() || value == 0 || value > 65535) { error = "地址端口格式无效"; return false; }
+                port = static_cast<uint16_t>(value); target.resize(colon);
+            }
+            if (!target.empty() && !std::all_of(target.begin(), target.end(), [](unsigned char c) { return std::isalnum(c) || c == '.' || c == '-'; })) { error = "请输入 IPv4 地址或本地设备主机名"; return false; }
+        }
+        if ((mode == "wifi" && od::IsUsbMuxTarget(target)) || (mode == "usb" && !target.empty() && !od::IsUsbMuxTarget(target))) { error = "所选设备与连接方式不匹配"; return false; }
+        if (noDevice) { error = "no-device 检查模式禁止连接硬件"; return false; }
+        if (!Configure(payload, error)) return false;
+        attempts.clear(); attemptIndex = 0; fallbackStopping = false;
+        exactEndpoint = exact;
+        if (exactEndpoint) attempts.push_back({target, id, mode, port, {target}});
+        else AddConnectionAttempts(target, id, mode, port);
         if (attempts.empty()) { error = "未找到可连接的 iPad；请刷新设备或填写地址，并在 iPad 上打开 OpenDisplay"; return false; }
         if (attempts.size() > 8) attempts.resize(8);
         // Use the existing tray gate while this engine owns display resources.
@@ -392,12 +425,14 @@ public:
             error = "旧版 iPad互联正在运行，请从其托盘菜单退出后再连接；旧软件会保留"; return false;
         }
         forcedFailure.clear(); started = true; everStreaming = false;
+        displaySide = side;
         BeginAttempt(); return true;
     }
 
     void BeginAttempt() {
         const auto& attempt = attempts[attemptIndex];
         od::StreamSettings settings;
+        settings.displaySide = displaySide;
         settings.fps = attempt.transport == "usb" ? std::min(config.fps, 60u) : config.fps;
         settings.bitrateBps = config.bitrateMbps * 1000000;
         settings.requirePrivateNetwork = config.requirePrivateNetwork;
@@ -411,13 +446,13 @@ public:
             auto result = discovery.get(); cache.Merge(result.wifi); cache.Expire();
             usb = std::move(result.usb); neighbors = std::move(result.neighbors.records);
             pipe.Event("devices", Devices());
-            if (started && attemptIndex < attempts.size() && attempts[attemptIndex].transport == "wifi") {
+            if (started && !exactEndpoint && attemptIndex < attempts.size() && attempts[attemptIndex].transport == "wifi") {
                 od::DeviceConfig device; device.id = attempts[attemptIndex].id; device.lastIpv4 = attempts[attemptIndex].target;
                 for (const auto& saved : config.devices) if (!device.id.empty() && saved.id == device.id) { device = saved; break; }
                 sender.UpdateConnectionCandidates(od::BuildDeviceCandidates(device, cache.Records(), neighbors));
             }
         }
-        if (started && !discovery.valid() && Clock::now() - lastDiscovery >= std::chrono::seconds(10)) Discover();
+        if (started && !exactEndpoint && !discovery.valid() && Clock::now() - lastDiscovery >= std::chrono::seconds(10)) Discover();
         const auto snapshot = sender.Snapshot();
         if (started && snapshot.phase == od::ConnectionPhase::Streaming) {
             coordinator.ReportStreaming(snapshot.deviceId);
@@ -451,6 +486,18 @@ public:
             const auto budget = std::chrono::seconds(8 * std::clamp<size_t>(attempts[attemptIndex].candidates.size(), 1, 8) + 4);
             if (!global && !fallbackStopping && Clock::now() - attemptAt > budget) { sender.RequestStop(); fallbackStopping = true; }
             if (fallbackStopping && !sender.IsRunning()) { sender.Stop(); ++attemptIndex; fallbackStopping = false; BeginAttempt(); }
+        }
+        if (started && exactEndpoint && !everStreaming && forcedFailure.empty()) {
+            const bool failed = snapshot.phase == od::ConnectionPhase::Failed || snapshot.phase == od::ConnectionPhase::UnsafeNetwork ||
+                snapshot.phase == od::ConnectionPhase::Blocked || snapshot.failure == od::FailureReason::DeviceIdentityMismatch ||
+                (snapshot.phase == od::ConnectionPhase::Reconnecting && snapshot.failure != od::FailureReason::None);
+            const bool timedOut = (snapshot.phase == od::ConnectionPhase::Connecting || snapshot.phase == od::ConnectionPhase::WaitingHello ||
+                snapshot.phase == od::ConnectionPhase::Idle) && Clock::now() - attemptAt > std::chrono::seconds(15);
+            if (failed || timedOut) {
+                sender.RequestStop();
+                forcedFailure = "原副屏重连失败：" + (snapshot.failure == od::FailureReason::None ?
+                    std::string("接收端未就绪") : Utf8(od::FailureHelpText(snapshot.failure, snapshot.detail)));
+            }
         }
         if (started && everStreaming && !config.autoReconnect && snapshot.phase != od::ConnectionPhase::Streaming) {
             sender.RequestStop(); forcedFailure = "连接已中断，自动重连已关闭；请停止后重新连接";
@@ -491,7 +538,16 @@ public:
             pipe.Response(request, clean, O(), clean ? "" : "虚拟屏未完成移除，请检查 Windows 显示设置后重试");
             pipe.Event("released", O({{"clean", B(clean)}})); return;
         }
-        if (command == "status") pipe.Response(request, true, Status());
+        if (command == "set_display_side") {
+            const auto side = StringField(*payload, "display_side");
+            std::string error;
+            bool ok = false;
+            if (side != "left" && side != "right") error = "副屏位置必须为 left 或 right";
+            else if (!started || closing || sender.Snapshot().phase != od::ConnectionPhase::Streaming)
+                error = "请等待 iPad 副屏连接完成";
+            else if ((ok = sender.SetDisplaySide(side, error))) displaySide = side;
+            pipe.Response(request, ok, Status(), error);
+        } else if (command == "status") pipe.Response(request, true, Status());
         else if (command == "discover") { Discover(); pipe.Response(request, true, Devices()); }
         else if (command == "configure" || command == "start") {
             std::string error;

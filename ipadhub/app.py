@@ -16,11 +16,13 @@ from PySide6.QtWidgets import (
     QListView, QMessageBox, QScrollArea, QSlider, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
+from . import __version__
 from .model import Mode, PreviewSession, State
 from .controls import SegmentedChoice, icon
 
 
 NAMES = {Mode.DISPLAY: "iPad 副屏", Mode.BRIDGE: "键鼠控制"}
+QUALITY_PRESETS = {"均衡": ("balanced", 30), "清晰": ("sharp", 45), "流畅": ("smooth", 15)}
 SCENARIOS = ["正常连接", "缺少条件", "连接失败", "停止失败", "长设备名"]
 
 
@@ -154,7 +156,7 @@ class HubWindow(QMainWindow):
         side.addStretch()
         side.addWidget(label("一个界面\n两种使用方式", "muted"))
         side.addSpacing(12)
-        side.addWidget(label("0.1.0 · 界面审核版", "micro"))
+        side.addWidget(label(__version__, "micro"))
         outer.addWidget(sidebar)
         content = QWidget()
         main = QVBoxLayout(content)
@@ -265,9 +267,16 @@ class HubWindow(QMainWindow):
         if display:
             self.transport_choice = SegmentedChoice(["自动", "USB", "Wi-Fi"], glyphs=["auto", "usb", "wifi"])
             self.transport_choice.setAccessibleName("连接方式")
-            self.quality_choice = SegmentedChoice(["均衡", "清晰", "流畅"], captions=["日常办公", "阅读与设计", "动态画面"])
+            self.quality_choice = SegmentedChoice(list(QUALITY_PRESETS), captions=[
+                f"{bitrate} Mbps" for _, bitrate in QUALITY_PRESETS.values()
+            ])
             self.quality_choice.setAccessibleName("画质预设")
             form.addRow("连接方式", self.transport_choice)
+            self.display_side_choice = SegmentedChoice(["电脑左侧", "电脑右侧"], glyphs=["left", "arrow"])
+            self.display_side_choice.setAccessibleName("副屏位置")
+            self.display_side_choice.setToolTip("设置 iPad 副屏在 Windows 扩展桌面中的位置")
+            self.display_side_choice.clearSelection()
+            form.addRow("副屏位置", self.display_side_choice)
             form.addRow("画质预设", self.quality_choice)
         else:
             self.board_status = label("模拟：USB 可用 · 蓝牙已配对", "hint")

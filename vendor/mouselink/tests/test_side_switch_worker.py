@@ -172,6 +172,13 @@ class Harness:
 
 
 class SideSwitchWorkerTests(unittest.TestCase):
+    def test_real_worker_passes_curve_to_controller(self):
+        with Harness() as h:
+            h.worker.pointer_profile = dict(curve=[[100,.5],[1000,1],[3000,2]])
+            h.start()
+            controller = h.controller(0)
+            self.assertEqual(controller.config.pointer_profile, h.worker.pointer_profile)
+
     def test_cleanup_precedes_new_owner_latest_choice_wins_and_starts_local(self):
         with Harness() as h:
             h.start()

@@ -35,6 +35,8 @@ public:
 #ifdef IPADHUB_ENGINE
     // A failed owned-display removal makes the hub refuse a mode handoff.
     static bool CleanupSucceeded();
+    bool PlaceOnSide(bool left, std::string& error);
+    std::string CurrentSide() const;
 #endif
 
     // Names this display's owner (the iPad's address) so its desktop position

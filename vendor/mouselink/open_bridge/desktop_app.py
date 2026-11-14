@@ -65,6 +65,8 @@ class Worker(QtCore.QThread):
     def __init__(self, native_edges=True, trial_seconds=0):
         super().__init__()
         self.native_edges = native_edges
+        self.pointer_profile = None
+        self.last_pointer_timing = {}
         self.trial_seconds = trial_seconds
         self.commands = queue.Queue()
         self.closing = False
@@ -253,6 +255,7 @@ class Worker(QtCore.QThread):
                     controller = KVMController(BridgeConfig(
                         port=self.port, mode=mode, sensitivity=speed, ipad_side=side,
                         absolute_enabled=True, native_edges_enabled=self.native_edges,
+                        pointer_profile=self.pointer_profile,
                         require_ready_on_start=resuming,
                         reconnect_max_attempts=1))
                     self.controller = controller
@@ -269,6 +272,9 @@ class Worker(QtCore.QThread):
                     raise
                 finally:
                     controller.stop()
+                    timing = getattr(controller, "timing", None)
+                    if timing and isinstance(timing.last_snapshot, dict):
+                        self.last_pointer_timing = timing.last_snapshot
                     with self._session_lock:
                         self.controller = None
                         self.running_bridge = False
@@ -298,6 +304,8 @@ class Worker(QtCore.QThread):
             "ready": bool(bridge and bridge.absolute_ready),
             "remote": bool(controller and controller._is_active),
             "switching": self.switching,
+            "pointer_timing": (controller.timing.last_snapshot if controller
+                               and hasattr(controller, "timing") else self.last_pointer_timing),
         }
 
     def run(self):

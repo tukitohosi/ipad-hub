@@ -22,6 +22,7 @@ class MouseReport:
     y: float = 0
     wheel: int = 0
     barrier: str = ""
+    keys: tuple = ()
 
 
 class NativeEdges:
@@ -46,20 +47,29 @@ class NativeEdges:
         self._recent_sequences = recent_sequences if recent_sequences is not None else {}
         self._waiting_sequence = None
         self._wheel_fraction = 0.0
+        self.motion = None
         self._queue_absolute()
 
     @property
     def pending_events(self):
         return len(self._events)
 
-    def _enqueue(self, kind, x, y, now):
-        if len(self._events) >= 4096:
+    def _enqueue(self, kind, x, y, now, projected=None):
+        if len(self._events) + len(self._reports) >= 4096:
             self.failure = "native edge input queue overflow"
             return
-        self._events.append((kind, x, y, now))
+        self._events.append((kind, x, y, now, projected))
 
     def move(self, dx, dy, now):
-        self._enqueue("move", dx, dy, now)
+        if self.motion:
+            projected = self.motion.project(dx, dy, now, self.sensitivity)
+        else:
+            scale = self.absolute_scale * self.sensitivity
+            projected = (dx * scale, dy * scale, abs(dx) > abs(dy))
+        self._enqueue("move", dx, dy, now, projected)
+
+    def keyboard(self, modifiers, keys, now):
+        self._enqueue("keyboard", modifiers, tuple(keys), now)
 
     def button(self, buttons, now):
         self._enqueue("button", buttons, 0, now)
@@ -84,9 +94,10 @@ class NativeEdges:
             self._reports.append(report)
 
     def _queue_relative(self, dx=0, dy=0, wheel=0, button_event=False):
-        if (self._reports and not button_event
+        if (self._reports and not button_event and not wheel
                 and self._reports[-1].channel == "relative"
                 and not self._reports[-1].barrier
+                and not self._reports[-1].wheel
                 and self._reports[-1].buttons == self.buttons):
             report = self._reports[-1]
             report.x += dx
@@ -96,16 +107,16 @@ class NativeEdges:
             self._reports.append(MouseReport("relative", self.buttons, dx, dy,
                                              wheel, "button" if button_event else ""))
 
-    def _first_edge(self, dx, dy):
+    def _first_edge(self, dx, dy, horizontal):
         hits = []
         x, y = self.pointer.x, self.pointer.y
         if dx < 0 and x + dx <= 0:
             # At return corners, vertical intent belongs to iPad gestures.
             # Small horizontal jitter must not turn a bottom push into return.
-            if self.pointer.return_edge != "left" or abs(dx) > abs(dy):
+            if self.pointer.return_edge != "left" or horizontal:
                 hits.append((-x / dx, "left"))
         if dx > 0 and x + dx >= LIMIT:
-            if self.pointer.return_edge != "right" or abs(dx) > abs(dy):
+            if self.pointer.return_edge != "right" or horizontal:
                 hits.append(((LIMIT - x) / dx, "right"))
         if dy < 0 and y + dy <= 0:
             hits.append((-y / dy, "top"))
@@ -130,13 +141,12 @@ class NativeEdges:
         # At corners, only an edge being left by this event can authorize resync.
         return any(outward[edge] < 0 and distance[edge] >= threshold for edge in self.edges)
 
-    def _move_absolute(self, dx, dy, at):
-        scale = self.absolute_scale * self.sensitivity
-        ax, ay = dx * scale, dy * scale
-        hit = self._first_edge(ax, ay) if not self.buttons else None
+    def _move_absolute(self, dx, dy, at, projected):
+        ax, ay, horizontal = projected
+        hit = self._first_edge(ax, ay, horizontal) if not self.buttons else None
         if hit is None:
             edge_return = self.pointer.move(ax, ay, at, self.buttons)
-            self.return_requested = edge_return and abs(ax) > abs(ay)
+            self.return_requested = edge_return and horizontal
             if not self.return_requested:
                 self._queue_absolute()
             return
@@ -157,13 +167,14 @@ class NativeEdges:
         if fraction < 1:
             # Only the unconsumed segment enters the relative channel. Keeping
             # both components preserves diagonal motion without replaying X/Y.
-            self._events.appendleft(("move", dx * (1 - fraction),
-                                     dy * (1 - fraction), at))
+            rest = 1 - fraction
+            self._events.appendleft(("move", dx * rest, dy * rest, at,
+                                     (ax * rest, ay * rest, horizontal)))
 
-    def _move_relative(self, dx, dy, at):
-        scale = self.absolute_scale * self.sensitivity
-        self.pointer.x = self.pointer._clamp(self.pointer.x + dx * scale)
-        self.pointer.y = self.pointer._clamp(self.pointer.y + dy * scale)
+    def _move_relative(self, dx, dy, at, projected):
+        ax, ay, _ = projected
+        self.pointer.x = self.pointer._clamp(self.pointer.x + ax)
+        self.pointer.y = self.pointer._clamp(self.pointer.y + ay)
         self._disarm_return()
         if not self.buttons and self._inward(dx, dy):
             self.state = "resync_wait"
@@ -174,12 +185,14 @@ class NativeEdges:
     def _advance(self):
         while (self._events and self.state in ("absolute", "relative")
                and not self.return_requested and not self.failure):
-            kind, x, y, at = self._events.popleft()
+            kind, x, y, at, projected = self._events.popleft()
             if kind == "move":
                 if self.state == "absolute":
-                    self._move_absolute(x, y, at)
+                    self._move_absolute(x, y, at, projected)
                 else:
-                    self._move_relative(x, y, at)
+                    self._move_relative(x, y, at, projected)
+            elif kind == "keyboard":
+                self._reports.append(MouseReport("keyboard", x, keys=y, barrier="keyboard"))
             elif kind == "button":
                 self.buttons = x
                 if self.buttons:
@@ -204,6 +217,8 @@ class NativeEdges:
             return None
         while self._reports:
             report = self._reports[0]
+            if report.channel == "keyboard":
+                return self._reports.popleft()
             if report.channel == "absolute":
                 self._reports.popleft()
                 wheel = max(-127, min(127, report.wheel))
@@ -225,6 +240,11 @@ class NativeEdges:
             if len(self._reports) == 1:
                 return None  # Retain sub-count motion until it can be emitted.
             following = self._reports[1]
+            if following.channel == "keyboard":
+                # A keyboard barrier can pass a fraction that cannot yet produce a
+                # relative HID unit. Keep the fraction for the next mouse report.
+                self._reports[0], self._reports[1] = following, report
+                continue
             if following.channel == "relative":
                 following.x += report.x
                 following.y += report.y

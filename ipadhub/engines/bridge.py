@@ -31,6 +31,14 @@ def load_worker_support():
     return Worker, comports
 
 
+def checked_pointer_profile(profile):
+    directory = str(vendor_directory())
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    from pointer_calibration import validate_profile
+    return validate_profile(profile)
+
+
 def read_settings(path: Path) -> tuple[dict, str]:
     value = {}
     warning = ""
@@ -58,6 +66,12 @@ def read_settings(path: Path) -> tuple[dict, str]:
         value["speed"] = 50
     if not isinstance(value.get("calibration"), dict):
         value["calibration"] = {}
+    if value.get("pointer_profile") is not None:
+        try:
+            value["pointer_profile"] = checked_pointer_profile(value["pointer_profile"])
+        except ValueError as exc:
+            warning = str(exc)
+            value["pointer_profile"] = None
     return value, warning
 
 
@@ -102,7 +116,7 @@ class BridgeEngine(QtCore.QObject):
         self.last_devices = None
         self.last_devices_at = -1.0
 
-    def event(self, name, payload):
+    def emit_event(self, name, payload):
         self._send({"v": 1, "session": self.session, "request": "", "type": "event",
                     "event": name, "payload": payload})
 
@@ -125,7 +139,8 @@ class BridgeEngine(QtCore.QObject):
         self._send(message)
 
     def hello(self):
-        self.event("hello", {"engine": "bridge", "version": "0.1.0"})
+        from ipadhub import __version__
+        self.emit_event("hello", {"engine": "bridge", "version": __version__})
         self.publish_status(force=True)
 
     def _ensure_worker(self):
@@ -134,6 +149,7 @@ class BridgeEngine(QtCore.QObject):
         self.resource_lock = self.lock_factory()
         try:
             self.worker = self.worker_factory(native_edges=True, trial_seconds=0)
+            self.worker.pointer_profile = self.settings.get("pointer_profile")
             self.worker.finished.connect(self._worker_finished)
             self.worker.start_handled.connect(self._start_handled)
             self.worker.calibration_done.connect(self._calibration_done)
@@ -155,7 +171,8 @@ class BridgeEngine(QtCore.QObject):
         return {"mode": self.settings["mode"], "speed": self.settings["speed"] / 100,
                 "ipad_side": self.settings["ipad_side"],
                 "hotkey_return_enabled": self.settings["hotkey_return_enabled"],
-                "calibration": self.settings["calibration"]}
+                "calibration": self.settings["calibration"],
+                "pointer_profile": self.settings.get("pointer_profile")}
 
     def _save(self, settings):
         temporary = self.settings_path.with_suffix(".tmp")
@@ -187,8 +204,13 @@ class BridgeEngine(QtCore.QObject):
             if not isinstance(payload["hotkey_return_enabled"], bool):
                 raise ValueError("紧急返回选项必须是布尔值。")
             values["hotkey_return_enabled"] = payload["hotkey_return_enabled"]
+        if "pointer_profile" in payload:
+            profile = payload["pointer_profile"]
+            values["pointer_profile"] = checked_pointer_profile(profile) if profile is not None else None
         if values != self.settings or not self.settings_path.exists():
             self._save(values)
+            if self.worker:
+                self.worker.pointer_profile = values.get("pointer_profile")
             if self.worker and self.worker.running_bridge:
                 self.worker.request_side_change(*self._start_values())
         return self.public_settings()
@@ -224,7 +246,7 @@ class BridgeEngine(QtCore.QObject):
                 self.failure = ""
                 self._ensure_worker()
                 devices = self.devices()
-                self.event("devices", {"devices": devices})
+                self.emit_event("devices", {"devices": devices})
                 self.response(request, payload={"devices": devices, "settings": self.public_settings()})
             elif command == "configure":
                 self.response(request, payload={"settings": self.configure(payload)})
@@ -295,7 +317,7 @@ class BridgeEngine(QtCore.QObject):
         self.calibration_pending = None
         if success and not self.stopping:
             self.last_calibration = (orientation, self.worker.device_serial)
-        self.event("calibration", {"orientation": orientation, "success": bool(success),
+        self.emit_event("calibration", {"orientation": orientation, "success": bool(success),
                                    "detail": detail, "confirmation_required": bool(success),
                                    "device_serial": self.worker.device_serial})
 
@@ -357,7 +379,7 @@ class BridgeEngine(QtCore.QObject):
         now = self.clock()
         if force or status != self.last_status or now - self.last_status_at >= 2:
             self.last_status, self.last_status_at = status, now
-            self.event("status", status)
+            self.emit_event("status", status)
 
     def tick(self):
         if self.released:
@@ -376,6 +398,12 @@ class BridgeEngine(QtCore.QObject):
             elif now >= self.start_deadline:
                 self._fail_start(self.worker.error or "等待设备就绪超时；请检查 USB、iPad 蓝牙与固件。")
             elif ready and not self.start_submitted:
+                profile = self.settings.get("pointer_profile")
+                if (profile and profile.get("board_serial")
+                        and profile["board_serial"] != self.worker.device_serial):
+                    self._fail_start("开发板与速度校准记录不同，请选择手动速度或重新校准。")
+                    self.publish_status(force=True)
+                    return
                 self.start_submitted = True
                 if not self.worker.request_start(*self._start_values(), self.pending_start):
                     self._fail_start(self.worker.error or "设备连接已变化，请重试。")
@@ -395,7 +423,7 @@ class BridgeEngine(QtCore.QObject):
                 devices = self.devices()
                 if devices != self.last_devices:
                     self.last_devices = devices
-                    self.event("devices", {"devices": devices})
+                    self.emit_event("devices", {"devices": devices})
             except OSError as exc:
                 self.failure = str(exc)
         self.publish_status()
@@ -448,7 +476,7 @@ class BridgeEngine(QtCore.QObject):
         for request in self.stop_requests:
             self.response(request, payload={"released": True})
         self.stop_requests.clear()
-        self.event("released", {"engine": "bridge", "released": True, "clean": True})
+        self.emit_event("released", {"engine": "bridge", "released": True, "clean": True})
         self.quit_callback()
 
 

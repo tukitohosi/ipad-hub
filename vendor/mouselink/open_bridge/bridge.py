@@ -1,6 +1,9 @@
 import ctypes
+import json
+import math
 import threading
 import time
+from collections import deque
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -14,6 +17,7 @@ from return_hotkey import ReturnChord
 from absolute_protocol import StatusParser, absolute_packet
 from pointer_boundary import AbsolutePointer
 from native_edges import NativeEdges
+from pointer_calibration import PhysicalMotion, physical_cursor, raw_device_id, reference_monitor, windows_pointer_signature
 
 
 class WindowsMessage(IntEnum):
@@ -262,6 +266,7 @@ class BridgeConfig:
     native_edges_enabled: bool = False
     ipad_side: str = "right"
     require_ready_on_start: bool = False
+    pointer_profile: dict | None = None
 
     def __post_init__(self):
         if self.ipad_side not in ("left", "right"):
@@ -394,7 +399,7 @@ class SerialBridge:
 
     @property
     def absolute_ready(self):
-        return self.status.version == 3 and self.status.ready(time.monotonic())
+        return self.status.version == 3 and self.status.ready(time.perf_counter())
 
     def send_absolute_report(self, buttons, x, y, wheel, sequence):
         return self._transmit(absolute_packet(x, y, buttons, wheel, sequence))
@@ -407,12 +412,12 @@ class SerialBridge:
     def ble_connected(self):
         return (
             self._ble_connected
-            and time.monotonic() - self._last_status_at <= self.STATUS_STALE_SECONDS
+            and time.perf_counter() - self._last_status_at <= self.STATUS_STALE_SECONDS
         )
 
     def wait_for_ble_status(self, timeout=1.5):
-        deadline = time.monotonic() + timeout
-        while self.is_connected and time.monotonic() < deadline:
+        deadline = time.perf_counter() + timeout
+        while self.is_connected and time.perf_counter() < deadline:
             if self._last_status_at > 0:
                 return self.ble_connected
             time.sleep(0.02)
@@ -519,7 +524,7 @@ class SerialBridge:
 
             if stop_event.is_set():
                 return
-            status = self._status_parser.feed(chunk, time.monotonic())
+            status = self._status_parser.feed(chunk, time.perf_counter())
             self._ble_connected = status.connected
             self._last_status_at = status.connected_at
 
@@ -581,6 +586,24 @@ class RawInputCapture(ABC):
         self._failed_event = threading.Event()
         self._failure = None
         self._wndproc_reference = None
+        self._registered_usage = False
+        self._previous_registration = None
+
+    def _current_registration(self):
+        count = wintypes.UINT()
+        get = _user32.GetRegisteredRawInputDevices
+        size = ctypes.sizeof(_RAWINPUTDEVICE)
+        if get(None, ctypes.byref(count), size) == -1:
+            raise ctypes.WinError()
+        if not count.value:
+            return None
+        items = (_RAWINPUTDEVICE * count.value)()
+        if get(items, ctypes.byref(count), size) == -1:
+            raise ctypes.WinError()
+        for item in items:
+            if item.usUsagePage == HidUsage.GENERIC_DESKTOP and item.usUsage == self._usage:
+                return _RAWINPUTDEVICE.from_buffer_copy(item)
+        return None
 
     def start(self):
         self._thread = threading.Thread(target=self._message_loop, daemon=True)
@@ -620,8 +643,14 @@ class RawInputCapture(ABC):
         )
         def window_procedure(hwnd, msg, wparam, lparam):
             if msg == WindowsMessage.INPUT:
-                self._process_input(lparam)
-                return 0
+                try:
+                    self._process_input(lparam)
+                except Exception as exc:
+                    self._failure = str(exc)
+                    self._failed_event.set()
+                    _user32.PostQuitMessage(1)
+                # DefWindowProc performs the required cleanup for foreground WM_INPUT.
+                return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
             if msg == WindowsMessage.DESTROY:
                 _user32.PostQuitMessage(0)
                 return 0
@@ -661,11 +690,12 @@ class RawInputCapture(ABC):
                 RawInputFlag.INPUT_SINK,
                 self._hwnd,
             )
+            self._previous_registration = self._current_registration()
             if not _user32.RegisterRawInputDevices(
                 ctypes.byref(raw_input_device), 1, ctypes.sizeof(_RAWINPUTDEVICE)
             ):
                 raise ctypes.WinError()
-
+            self._registered_usage = True
             self._ready_event.set()
 
             msg = wintypes.MSG()
@@ -677,6 +707,16 @@ class RawInputCapture(ABC):
             self._failed_event.set()
             self._ready_event.set()
         finally:
+            if self._registered_usage:
+                try:
+                    current = self._current_registration()
+                    if current and current.hwndTarget == self._hwnd:
+                        restore = self._previous_registration or _RAWINPUTDEVICE(
+                            HidUsage.GENERIC_DESKTOP, self._usage, 1, None)
+                        _user32.RegisterRawInputDevices(ctypes.byref(restore), 1, ctypes.sizeof(restore))
+                except OSError as exc:
+                    self._failure = str(exc)
+                self._registered_usage = False
             if self._hwnd:
                 _user32.DestroyWindow(self._hwnd)
                 self._hwnd = None
@@ -685,39 +725,50 @@ class RawInputCapture(ABC):
 
 
 class RawMouseCapture(RawInputCapture):
-    def __init__(self, on_move):
+    def __init__(self, on_move, device_move=None):
         super().__init__("RawMouseWindow", HidUsage.MOUSE)
         self._on_move = on_move
+        self._device_move = device_move
+        self._device_names = {}
 
     def _process_input(self, lparam):
         size = wintypes.UINT(0)
-        _user32.GetRawInputData(
-            lparam,
+        result = _user32.GetRawInputData(
+            wintypes.HANDLE(lparam),
             RawInputCommand.INPUT,
             None,
             ctypes.byref(size),
             ctypes.sizeof(_RAWINPUTHEADER),
         )
 
-        if size.value == 0:
+        if result == -1 or size.value < ctypes.sizeof(_RAWINPUT_MOUSE):
             return
 
         buffer = (ctypes.c_byte * size.value)()
-        _user32.GetRawInputData(
-            lparam,
+        result = _user32.GetRawInputData(
+            wintypes.HANDLE(lparam),
             RawInputCommand.INPUT,
             buffer,
             ctypes.byref(size),
             ctypes.sizeof(_RAWINPUTHEADER),
         )
 
+        if result < ctypes.sizeof(_RAWINPUT_MOUSE):
+            return
         raw_input = ctypes.cast(buffer, ctypes.POINTER(_RAWINPUT_MOUSE)).contents
 
-        if raw_input.header.dwType == RawInputType.MOUSE:
+        if (raw_input.header.dwType == RawInputType.MOUSE and raw_input.header.hDevice
+                and not raw_input.mouse.usFlags & 1):
             delta_x = raw_input.mouse.lLastX
             delta_y = raw_input.mouse.lLastY
             if delta_x or delta_y:
-                self._on_move(delta_x, delta_y)
+                if self._device_move:
+                    handle = raw_input.header.hDevice
+                    if handle not in self._device_names:
+                        self._device_names[handle] = raw_device_id(handle)
+                    self._device_move(delta_x, delta_y, self._device_names[handle])
+                else:
+                    self._on_move(delta_x, delta_y)
 
 
 class CursorManager:
@@ -754,6 +805,83 @@ class CursorManager:
             self.unlock()
 
 
+class InputInbox:
+    """One capture session, many callbacks, one serial writer."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.events = deque()
+        self.closed = self.overflow = False
+        self.peak = 0
+
+    def put(self, kind, *values):
+        with self.lock:
+            if self.closed or self.overflow:
+                return
+            if len(self.events) >= 4096:
+                self.overflow = True
+                return
+            self.events.append((time.perf_counter(), kind, values))
+            self.peak = max(self.peak, len(self.events))
+
+    def take(self):
+        with self.lock:
+            events, self.events = self.events, deque()
+            return events
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            self.events.clear()
+
+
+class MotionTiming:
+    """Bounded anonymous timing measurements for normal application sessions."""
+    def __init__(self, period):
+        self.period = period
+        self.gaps = deque(maxlen=8192)
+        self.queue_age = deque(maxlen=8192)
+        self.ack_rtt = deque(maxlen=8192)
+        self.raw_count = self.report_count = self.failures = 0
+        self.matched_raw = self.other_raw = 0
+        self.last_raw = self.last_motion_report = None
+        self.mapping = "manual"
+        self.last_snapshot = {}
+        self.next_snapshot = 0.0
+
+    def raw(self, at, now):
+        self.raw_count += 1
+        if self.last_raw is None or at - self.last_raw > self.period * 2:
+            self.last_motion_report = None
+        self.last_raw = at
+        self.queue_age.append(max(0.0, now-at) * 1000)
+
+    def written(self, at, moving):
+        self.report_count += 1
+        if moving:
+            if self.last_motion_report is not None:
+                self.gaps.append((at-self.last_motion_report)*1000)
+            self.last_motion_report = at
+        else:
+            self.last_motion_report = None
+
+    def publish(self, depth, force=False):
+        now = time.perf_counter()
+        if not force and now < self.next_snapshot:
+            return
+        self.next_snapshot = now + 1
+        def percent(values, fraction):
+            if not values:
+                return None
+            values = sorted(values)
+            return round(values[math.ceil(fraction*len(values))-1], 2)
+        self.last_snapshot = dict(mapping=self.mapping, raw=self.raw_count,
+            matched_raw=self.matched_raw, other_raw=self.other_raw,
+            reports=self.report_count, queue_peak=depth, failed_writes=self.failures,
+            continuous_intervals=len(self.gaps), gap_p95_ms=percent(self.gaps,.95),
+            gap_p99_ms=percent(self.gaps,.99), max_gap_ms=percent(self.gaps,1),
+            queue_age_p95_ms=percent(self.queue_age,.95), ack_p95_ms=percent(self.ack_rtt,.95))
+
+
 class KVMController:
     # Protect short stop/start cycles from reusing an ACK sequence immediately.
     _native_sequence_history = {}
@@ -775,6 +903,10 @@ class KVMController:
         self._activation_requested = threading.Event()
         self._return_chord = ReturnChord()
         self._motion_lock = threading.RLock()
+        self._inbox = None
+        self._physical_motion = None
+        self._paste_thread = None
+        self.timing = MotionTiming(1.0 / config.poll_rate_hz)
         self._pointer = None
         self._native_edges = None
         self._absolute_dirty = False
@@ -786,6 +918,8 @@ class KVMController:
         self._is_running = False
         self._exit_requested = True
         self._activation_requested.set()
+        if self._inbox is not None:
+            self._inbox.close()
 
     def run(self):
         try:
@@ -799,9 +933,9 @@ class KVMController:
 
             print(f"[OK] Connected to: {self._config.port}")
             if self._config.require_ready_on_start:
-                deadline = time.monotonic() + 1.5
+                deadline = time.perf_counter() + 1.5
                 while (self._is_running and self._bridge.is_connected
-                       and not self._bridge.absolute_ready and time.monotonic() < deadline):
+                       and not self._bridge.absolute_ready and time.perf_counter() < deadline):
                     time.sleep(0.02)
                 if not self._is_running:
                     return
@@ -884,7 +1018,7 @@ class KVMController:
                          point.x >= right_edge - self._config.edge_margin_px)
                 )
 
-                now = time.monotonic()
+                now = time.perf_counter()
                 # Never transfer a Windows drag or a held modifier to iPad.
                 held = any(_user32.GetAsyncKeyState(vk) & 0x8000
                            for vk in (1, 2, 4, 5, 6, 16, 17, 18, 91, 92))
@@ -953,7 +1087,31 @@ class KVMController:
             f"('{toggle_key_name}' or standalone Ctrl+left Alt = exit)"
         )
 
-        raw_mouse = RawMouseCapture(self._handle_raw_mouse_move)
+        native = self._native_edges
+        inbox = InputInbox() if native else None
+        self._inbox = inbox
+        if inbox is not None:
+            self.timing = MotionTiming(1.0 / self._config.poll_rate_hz)
+            self._physical_motion = None
+            profile = self._config.pointer_profile
+            if profile:
+                try:
+                    monitor, _ = reference_monitor(physical_cursor())
+                    if (monitor.casefold() == profile["monitor"].casefold()
+                            and windows_pointer_signature() == profile["windows"]):
+                        self._physical_motion = PhysicalMotion(profile)
+                        self.timing.mapping = "waiting_for_mouse"
+                    else:
+                        self.timing.mapping = "screen_or_windows_changed"
+                except (ValueError, OSError):
+                    self.timing.mapping = "settings_unavailable"
+            def capture_move(dx, dy, device=""):
+                if not inbox.closed:
+                    self._record_mouse_input(inbox, dx, dy, device)
+            raw_mouse = RawMouseCapture(capture_move,
+                    device_move=capture_move if self._physical_motion else None)
+        else:
+            raw_mouse = RawMouseCapture(self._handle_raw_mouse_move)
         keyboard_listener = None
         mouse_listener = None
 
@@ -963,16 +1121,19 @@ class KVMController:
                 print(f"\n[WARNING] Mouse capture unavailable: {detail}")
                 return
             with self._cursor.locked_context():
+                # Late OS messages still point to the session that installed
+                # these listeners. Never send them to a subsequent capture.
+                def live_key(handler, key):
+                    if inbox is None or not inbox.closed:
+                        handler(key)
                 keyboard_listener = keyboard.Listener(
-                    on_press=self._handle_key_press,
-                    on_release=self._handle_key_release,
-                    suppress=True,
-                )
+                    on_press=lambda key: live_key(self._handle_key_press, key),
+                    on_release=lambda key: live_key(self._handle_key_release, key), suppress=True)
                 mouse_listener = mouse.Listener(
-                    on_click=self._handle_mouse_click,
-                    on_scroll=self._handle_mouse_scroll,
-                    suppress=True,
-                )
+                    on_click=(lambda x,y,b,down: inbox.put("button", b, down))
+                        if inbox else self._handle_mouse_click,
+                    on_scroll=(lambda x,y,dx,dy: inbox.put("wheel", dy))
+                        if inbox else self._handle_mouse_scroll, suppress=True)
                 keyboard_listener.start()
                 mouse_listener.start()
                 if self._pointer is not None:
@@ -996,19 +1157,35 @@ class KVMController:
                         self._exit_reason = "mouse capture failure"
                         self._exit_requested = True
                         break
+                    if inbox:
+                        if inbox.overflow:
+                            self._exit_reason = "mouse input queue overflow"
+                            break
+                        self._consume_input(inbox)
                     with self._motion_lock:
                         self._confirm_absolute_edge()
                         self._flush_mouse_movement()
-                        timed_out = (self._native_edges.acknowledgment_timed_out(time.monotonic())
+                        timed_out = (self._native_edges.acknowledgment_timed_out(time.perf_counter())
                                      if self._native_edges is not None else
-                                     self._unacked_since and time.monotonic() - self._unacked_since > 0.8)
+                                     self._unacked_since and time.perf_counter() - self._unacked_since > 0.8)
                         if timed_out:
                             self._exit_reason = "BLE acknowledgment timed out"
                             self._exit_requested = True
-                    time.sleep(0.005)
+                    if inbox:
+                        self.timing.publish(inbox.peak)
+                        period = 1.0 / self._config.poll_rate_hz
+                        delay = self._state.last_transmission_time + period - time.perf_counter()
+                        # On Windows Python 3.12 sleep uses a high-resolution
+                        # timer. Event.wait(8ms) can round up to a 15.6ms tick.
+                        # Input stays ordered until the next report deadline.
+                        time.sleep(delay if 0 < delay <= period else period)
+                    else:
+                        time.sleep(0.005)
         finally:
             self._is_active = False
             self._paste_cancel_requested = True
+            if inbox:
+                inbox.close()
             if keyboard_listener is not None:
                 keyboard_listener.stop()
                 keyboard_listener.join(timeout=1.0)
@@ -1016,28 +1193,82 @@ class KVMController:
                 mouse_listener.stop()
                 mouse_listener.join(timeout=1.0)
             raw_mouse.stop()
+            if self._paste_thread is not None:
+                self._paste_thread.join()
             self._release_all_remote_inputs()
+            if inbox:
+                self.timing.publish(inbox.peak, force=True)
+                print("[POINTER] " + json.dumps(dict(self.timing.last_snapshot,
+                      exit_reason=self._exit_reason), ensure_ascii=False))
+            self._inbox = None
             self._pointer = None
             self._native_edges = None
             self._park_cursor_inside_windows()
-            self._last_remote_exit_at = time.monotonic()
+            self._last_remote_exit_at = time.perf_counter()
             if self._exit_reason:
                 print(f"\n[INFO] Returned to Windows: {self._exit_reason}")
 
+    def _consume_input(self, inbox):
+        native = self._native_edges
+        discrete = False
+        now = time.perf_counter()
+        for at, kind, values in inbox.take():
+            if self._exit_requested or not self._is_running:
+                return
+            if kind == "move":
+                dx, dy, device = values
+                if self._physical_motion:
+                    matched = device == self._config.pointer_profile["mouse"]
+                    native.motion = self._physical_motion if matched else None
+                    self.timing.mapping = "matched" if matched else "different_mouse"
+                    if matched:
+                        self.timing.matched_raw += 1
+                    else:
+                        self.timing.other_raw += 1
+                self.timing.raw(at, now)
+                native.move(dx, dy, at)
+            elif kind == "button":
+                mask = PYNPUT_TO_MOUSE_BUTTON.get(values[0], 0)
+                if values[1]:
+                    self._state.mouse_buttons |= mask
+                else:
+                    self._state.mouse_buttons &= ~mask
+                native.button(self._state.mouse_buttons, at)
+            elif kind == "wheel":
+                native.scroll(values[0], at)
+            elif kind == "keyboard":
+                native.keyboard(*values, at)
+            discrete |= kind != "move"
+        if discrete:
+            # Prior movement must appear before a press. Dispatch queued barriers
+            # promptly, leaving the ACK state machine to gate a channel switch.
+            self._confirm_absolute_edge()
+            for _ in range(32):
+                if not self._flush_native_mouse(force=True):
+                    break
+
+    def _record_mouse_input(self, inbox, delta_x, delta_y, device):
+        if self._is_active and not self._exit_requested:
+            inbox.put("move", delta_x, delta_y, device)
+
     def _handle_raw_mouse_move(self, delta_x, delta_y):
         if not self._is_active or self._exit_requested:
+            return
+        inbox = self._inbox
+        if inbox is not None:
+            inbox.put("move", delta_x, delta_y, "")
             return
 
         if self._pointer is not None:
             with self._motion_lock:
                 self._confirm_absolute_edge()
                 if self._native_edges is not None:
-                    self._native_edges.move(delta_x, delta_y, time.monotonic())
+                    self._native_edges.move(delta_x, delta_y, time.perf_counter())
                     self._flush_mouse_movement()
                     return
                 scale = self._config.absolute_scale * self._config.sensitivity
                 if self._pointer.move(delta_x * scale, delta_y * scale,
-                                      time.monotonic(), self._state.mouse_buttons):
+                                      time.perf_counter(), self._state.mouse_buttons):
                     self._exit_reason = f"iPad {self._pointer.return_edge} edge"
                     self._exit_requested = True
                     return
@@ -1152,12 +1383,12 @@ class KVMController:
             else:
                 self._state.mouse_buttons &= ~button_mask
             if self._native_edges is not None:
-                self._native_edges.button(self._state.mouse_buttons, time.monotonic())
+                self._native_edges.button(self._state.mouse_buttons, time.perf_counter())
                 self._confirm_absolute_edge()
                 self._flush_native_mouse(force=True)
                 return
             if self._pointer is not None:
-                self._pointer.move(0, 0, time.monotonic(), self._state.mouse_buttons)
+                self._pointer.move(0, 0, time.perf_counter(), self._state.mouse_buttons)
             self._send_mouse_report(0, 0, 0)
 
     def _handle_mouse_scroll(self, x, y, dx, dy):
@@ -1166,7 +1397,7 @@ class KVMController:
 
         with self._motion_lock:
             if self._native_edges is not None:
-                self._native_edges.scroll(dy, time.monotonic())
+                self._native_edges.scroll(dy, time.perf_counter())
                 self._confirm_absolute_edge()
                 self._flush_mouse_movement()
                 return
@@ -1174,10 +1405,15 @@ class KVMController:
             self._flush_mouse_movement()
 
     def _sync_keyboard_state(self):
-        success = self._bridge.send_keyboard_report(
-            self._state.active_modifiers,
-            list(self._state.pressed_keys),
-        )
+        self._submit_keys(self._state.active_modifiers, tuple(self._state.pressed_keys))
+
+    def _submit_keys(self, modifiers, keys):
+        inbox = self._inbox
+        if inbox is not None:
+            if self._is_active and not self._exit_requested:
+                inbox.put("keyboard", modifiers, tuple(keys))
+            return
+        success = self._bridge.send_keyboard_report(modifiers, list(keys))
         if not success:
             self._handle_connection_lost()
 
@@ -1192,8 +1428,8 @@ class KVMController:
             success = self._bridge.send_absolute_report(
                 self._state.mouse_buttons, x, y, dw, self._sequence)
             if not self._unacked_since:
-                self._unacked_since = time.monotonic()
-            self._pointer.submitted(self._sequence, x, y, time.monotonic(),
+                self._unacked_since = time.perf_counter()
+            self._pointer.submitted(self._sequence, x, y, time.perf_counter(),
                                     success, self._state.mouse_buttons)
             if not success:
                 self._handle_connection_lost()
@@ -1209,7 +1445,7 @@ class KVMController:
         if self._native_edges is not None:
             self._flush_native_mouse()
             return
-        now = time.monotonic()
+        now = time.perf_counter()
         min_interval = 1.0 / self._config.poll_rate_hz
 
         if (now - self._state.last_transmission_time) < min_interval:
@@ -1248,9 +1484,12 @@ class KVMController:
         if status.ack_at > self._last_ack_at:
             self._last_ack_at = status.ack_at
             if self._native_edges is not None:
-                self._native_edges.acknowledge(status.ack_sequence, status.ack_x,
+                sent = self._native_edges._sent.get(status.ack_sequence)
+                matched = self._native_edges.acknowledge(status.ack_sequence, status.ack_x,
                                                status.ack_y, status.ack_buttons,
                                                status.ack_accepted, status.ack_at)
+                if matched and sent:
+                    self.timing.ack_rtt.append((status.ack_at - sent[1])*1000)
                 if self._native_edges.failure:
                     self._exit_reason = self._native_edges.failure
                     self._exit_requested = True
@@ -1266,7 +1505,7 @@ class KVMController:
         native = self._native_edges
         if native is None or self._exit_requested:
             return
-        now = time.monotonic()
+        now = time.perf_counter()
         if not force and now - self._state.last_transmission_time < 1.0 / self._config.poll_rate_hz:
             return
         report = native.next_report()
@@ -1281,7 +1520,9 @@ class KVMController:
         if report is None:
             return
         sequence = None
-        if report.channel == "absolute":
+        if report.channel == "keyboard":
+            success = self._bridge.send_keyboard_report(report.buttons, list(report.keys))
+        elif report.channel == "absolute":
             sequence = native.next_sequence(now)
             if sequence is None:
                 self._exit_reason = native.failure
@@ -1291,10 +1532,15 @@ class KVMController:
                                                          report.wheel, sequence)
         else:
             success = self._bridge.send_mouse_report(report.buttons, report.x, report.y, report.wheel)
-        native.submitted(report, sequence, now, success)
+        if report.channel != "keyboard":
+            native.submitted(report, sequence, now, success)
+            self.timing.written(time.perf_counter(), report.channel == "absolute"
+                                and not report.barrier and not report.wheel and native.state == "absolute")
         self._state.last_transmission_time = now
         if not success:
+            self.timing.failures += 1
             self._handle_connection_lost()
+        return success
 
     def _handle_connection_lost(self):
         if not self._is_active:
@@ -1316,7 +1562,7 @@ class KVMController:
             # The other collection was released before switching. Replaying an
             # old absolute position during relative cleanup would move the iPad.
             if native.active_channel == "absolute":
-                sequence = native.next_sequence(time.monotonic())
+                sequence = native.next_sequence(time.perf_counter())
                 # Cleanup never waits for ACK; exhaustion must not prevent an
                 # absolute-button release in its own HID collection.
                 self._bridge.send_absolute_report(0, *native.last_absolute, 0,
@@ -1377,11 +1623,12 @@ class KVMController:
 
         self._is_pasting = True
         self._paste_cancel_requested = False
-        threading.Thread(target=self._type_clipboard_as_keystrokes, daemon=True).start()
+        self._paste_thread = threading.Thread(target=self._type_clipboard_as_keystrokes, daemon=True)
+        self._paste_thread.start()
 
     def _send_keypress(self, modifiers, keycode):
-        self._bridge.send_keyboard_report(modifiers, [keycode])
-        self._bridge.send_keyboard_report(0, [])
+        self._submit_keys(modifiers, (keycode,))
+        self._submit_keys(0, ())
 
     def _release_control_modifiers(self):
         ctrl_mask = KeyboardModifier.CTRL_LEFT | KeyboardModifier.CTRL_RIGHT
@@ -1393,7 +1640,7 @@ class KVMController:
         if self._state.pressed_keys or self._state.active_modifiers:
             self._state.pressed_keys.clear()
             self._state.active_modifiers = 0
-        self._bridge.send_keyboard_report(0, [])
+        self._submit_keys(0, ())
 
     def _translate_char_to_hid(self, ch):
         if ch in CHAR_TO_HID:

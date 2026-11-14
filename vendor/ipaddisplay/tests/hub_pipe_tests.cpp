@@ -103,13 +103,43 @@ int wmain(int argc, wchar_t** argv) {
         session.Command("start", "stale", O(), "old-session");
         Check(!Ok(session.Receive("request", "stale")), "reject stale session");
         session.Command("start", "hardware"); Check(!Ok(session.Receive("request", "hardware")), "no-device refuses start");
+        session.Command("set_display_side", "idle-side", O({{"display_side", S("left")}}));
+        auto idleSide = session.Receive("request", "idle-side");
+        Check(idleSide && !Ok(idleSide) && StringField(*idleSide, "error") == "请等待 iPad 副屏连接完成",
+              "idle engine never moves a display");
+        session.Command("start", "side-value", O({{"display_side", S("above")}}));
+        auto badSide = session.Receive("request", "side-value");
+        Check(badSide && !Ok(badSide) && StringField(*badSide, "error") == "副屏位置必须为 left 或 right",
+              "invalid start display side rejected before hardware access");
+        for (const auto& transport : {"auto", "wifi"}) {
+            session.Command("start", "exact", O({{"exact_endpoint", B(true)}, {"target", S("usb:connected-iPad")},
+                {"transport", S(transport)}, {"port", N(9001)}}));
+            auto rejected = session.Receive("request", "exact");
+            Check(!Ok(rejected) && rejected && StringField(*rejected, "error").find("no-device") == std::string::npos,
+                  "exact reconnect rejects automatic fallback or mismatched transport before accessing hardware");
+        }
         session.Command("configure", "cfg", O({{"profile", S("sharp")}, {"preferred_device_id", S("保留设备")}}));
         Check(Ok(session.Receive("request", "cfg")), "configure acknowledged");
-        std::ifstream file(std::filesystem::path(session.dir) / L"config.json");
-        const std::string saved((std::istreambuf_iterator<char>(file)), {});
+        const auto readConfig = [&session]() {
+            std::ifstream file(std::filesystem::path(session.dir) / L"config.json");
+            return std::string(std::istreambuf_iterator<char>(file), {});
+        };
+        const auto saved = readConfig();
         Check(saved.find("futureOption") != std::string::npos && saved.find("1.25") != std::string::npos, "unknown config retained");
         Check(saved.find("\"taskbarRouting\":true") != std::string::npos, "known config survives unknown decimals");
         Check(saved.find("保留设备") != std::string::npos, "UTF8 config retained");
+        const auto checkQuality = [&](const char* request, Json payload, int profile, int bitrate) {
+            session.Command("configure", request, std::move(payload));
+            Check(Ok(session.Receive("request", request)), "quality change acknowledged");
+            const auto config = readConfig();
+            Check(config.find("\"streamProfile\":" + std::to_string(profile) + ",") != std::string::npos, "saved profile matches selection");
+            Check(config.find("\"fps\":60,") != std::string::npos, "saved quality frame rate");
+            Check(config.find("\"bitrateMbps\":" + std::to_string(bitrate) + ",") != std::string::npos, "saved quality bitrate");
+        };
+        checkQuality("custom", O({{"fps", N(60)}, {"bitrate_mbps", N(100)}}), 3, 100);
+        checkQuality("balanced", O({{"profile", S("balanced")}}), 0, 30);
+        checkQuality("smooth", O({{"profile", S("smooth")}}), 1, 15);
+        checkQuality("sharp", O({{"profile", S("sharp")}}), 2, 45);
         session.Command("configure", "bad-range", O({{"fps", N(-10)}}));
         Check(!Ok(session.Receive("request", "bad-range")), "reject invalid config range");
         session.Command("discover", "discover"); Check(Ok(session.Receive("request", "discover")), "bounded discovery");

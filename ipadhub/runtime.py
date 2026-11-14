@@ -186,7 +186,7 @@ class EngineProcess(QObject):
 class RuntimeController(QObject):
     changed = Signal()
     devices = Signal(object, list)
-    event = Signal(object, str, dict)
+    engine_event = Signal(object, str, dict)
     stopped = Signal()
 
     def __init__(self, storage, parent=None, factory=EngineProcess):
@@ -196,6 +196,7 @@ class RuntimeController(QObject):
         self.owner = None
         self.selected = Mode.DISPLAY
         self.pending = None
+        self._display_start = None
         self.state = State.READY
         self.detail = "选择用途后点击刷新设备，或开始连接。"
         self.snapshot = {}
@@ -214,7 +215,8 @@ class RuntimeController(QObject):
             return False
         self.selected = mode
         action = (mode, command, payload or {})
-        if self.engine is not None and self.owner != mode:
+        stopped_display_needed = mode == self.owner == Mode.DISPLAY and command == "start" and self.state in (State.FAILED, State.MISSING)
+        if self.engine is not None and (self.owner != mode or stopped_display_needed):
             self.pending = action
             self._begin_stop()
         elif self.engine is None:
@@ -223,8 +225,54 @@ class RuntimeController(QObject):
             self._send(command, payload)
         return True
 
+    @property
+    def changing_display_quality(self):
+        return (self.owner == Mode.DISPLAY and self.state == State.STOPPING
+                and self.pending is not None and self.pending[:2] == (Mode.DISPLAY, "start")
+                and self.pending[2].get("exact_endpoint") is True)
+
+    @property
+    def has_display_endpoint(self):
+        return self._display_start is not None and self._display_start.get("exact_endpoint") is True
+
+    @property
+    def can_retry_display(self):
+        return (self.has_display_endpoint and not self.release_blocked and self.owner in (None, Mode.DISPLAY)
+                and self.state in (State.FAILED, State.MISSING))
+
+    def reconnect_display(self, quality, *, retry=False):
+        if (not self.has_display_endpoint or self.busy_tool
+                or self.release_blocked or self.quitting):
+            return False
+        updating = self.changing_display_quality
+        if not (updating or (self.owner == Mode.DISPLAY and self.state == State.ACTIVE) or (retry and self.can_retry_display)):
+            return False
+        options = self._display_start.copy()
+        options.pop("profile", None)  # Legacy custom quality uses numeric fields alone.
+        options.update(quality)
+        # Reconnect where the live monitor is, including changes made in
+        # Windows Display Settings since the original start request.
+        layout = self.pending[2] if updating else self.snapshot
+        if updating or (self.state == State.ACTIVE and "display_side" in layout):
+            current_side = layout.get("display_side")
+            if current_side in ("left", "right"):
+                options["display_side"] = current_side
+            else:
+                options.pop("display_side", None)
+        if self.engine is None:
+            self._launch((Mode.DISPLAY, "start", options))
+            return True
+        self.pending = (Mode.DISPLAY, "start", options)
+        if updating:
+            self.changed.emit()
+        else:
+            self._begin_stop()
+        return True
+
     def _launch(self, action):
         mode, command, payload = action
+        if mode != Mode.DISPLAY or command != "start":
+            self._display_start = None
         self.owner, self.selected = mode, mode
         self.state = State.CONNECTING
         self.detail = "正在启动后台并检查连接条件…"
@@ -243,6 +291,8 @@ class RuntimeController(QObject):
             return
         request = self.engine.send(command, payload)
         self._requests[request] = command
+        if command == "start" and self.owner == Mode.DISPLAY:
+            self._display_start = dict(payload or {})
         if command in ("start", "discover"):
             self.state = State.CONNECTING
             self.detail = "正在连接，请保持 iPad 接收端在前台。" if self.owner == Mode.DISPLAY else "正在确认开发板和蓝牙就绪。"
@@ -254,9 +304,10 @@ class RuntimeController(QObject):
         self.pending = None
         if self.engine is None:
             if not self.release_blocked:
+                self._display_start = None
                 self.state = State.READY
                 self.stopped.emit()
-        else:
+        elif self.state != State.STOPPING:
             self._begin_stop()
         self.changed.emit()
 
@@ -274,10 +325,13 @@ class RuntimeController(QObject):
         event = item.get("event", "")
         if item.get("type") == "response":
             command = self._requests.pop(item.get("request"), "")
-            if not item.get("ok", False) and self.state != State.STOPPING:
+            if command == "set_display_side" and self.state == State.ACTIVE and "display_side" in payload:
+                self.snapshot.update(display_side=payload["display_side"],
+                                     display_side_error=payload.get("display_side_error", ""))
+            if not item.get("ok", False) and self.state != State.STOPPING and command != "set_display_side":
                 self.state = State.FAILED
                 self.detail = item.get("error") or payload.get("detail") or "后台未能完成操作。"
-            self.event.emit(self.owner, "response:" + command, item)
+            self.engine_event.emit(self.owner, "response:" + command, item)
         elif event == "devices":
             self.devices.emit(self.owner, payload.get("devices", []))
         elif event == "status":
@@ -287,7 +341,17 @@ class RuntimeController(QObject):
                               "connecting": State.CONNECTING, "active": State.ACTIVE, "stopping": State.STOPPING,
                               "failed": State.FAILED, "missing": State.MISSING}.get(payload.get("state"), State.FAILED)
                 self.detail = payload.get("detail") or self.state.value
-        self.event.emit(self.owner, event, payload)
+                # The sender can fall back to a different device, transport
+                # or address before OpenDisplay completes its handshake.
+                if self.state == State.ACTIVE and self.owner == Mode.DISPLAY and self._display_start is not None:
+                    port = payload.get("connected_port")
+                    if payload.get("connected_target") and payload.get("transport") in ("wifi", "usb") and isinstance(port, int) and 1 <= port <= 65535:
+                        identity = payload.get("device_id", "")
+                        self._display_start.update(exact_endpoint=True, target=payload["connected_target"], port=port,
+                                                   transport=payload["transport"], device_id=identity)
+                        if self._display_start.get("preferred_device_id"):
+                            self._display_start["preferred_device_id"] = identity
+        self.engine_event.emit(self.owner, event, payload)
         self.changed.emit()
 
     def _fault(self, source, detail):
@@ -311,6 +375,8 @@ class RuntimeController(QObject):
             return
         self.stop_timer.stop()
         self.engine = None
+        if not (self.has_display_endpoint and clean and detail and not self.quitting):
+            self._display_start = None
         self._requests.clear()
         self.snapshot = {}
         self.owner = None
@@ -344,6 +410,6 @@ class RuntimeController(QObject):
         self.pending = None
         if self.engine is None:
             self.stopped.emit()
-        else:
+        elif self.state != State.STOPPING:
             self._begin_stop()
         return True

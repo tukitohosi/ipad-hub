@@ -5,6 +5,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "app/SenderApp.h"
+#include "display/DisplayCatalog.h"
 
 #include <atomic>
 #include <cassert>
@@ -202,6 +203,27 @@ void StopDuringHello()
 
 int main()
 {
+    {
+        const std::wstring ipad = L"extension";
+        std::vector<od::DisplayInfo> screens{{L"pc", {0, 0, 1920, 1080}, true},
+                                            {ipad, {1920, 0, 2944, 768}, false}};
+        auto left = od::SidePosition(screens, ipad, true);
+        auto right = od::SidePosition(screens, ipad, false);
+        assert(left && left->x == -1024 && left->y == 0);
+        assert(right && right->x == 1920 && right->y == 0);
+        assert(od::HorizontalSide(screens, ipad) == "right");
+        screens[1].bounds = {-1024, 60, 0, 828};
+        assert(od::HorizontalSide(screens, ipad) == "left");
+        screens[1].bounds = {-1024, -768, 0, 0};
+        assert(od::HorizontalSide(screens, ipad).empty());
+        screens.push_back({L"other", {-1280, -100, 0, 980}, false});
+        screens.push_back({L"far", {-2880, 200, -1280, 1100}, false});
+        screens.push_back({L"above", {-9000, -800, 0, 0}, false});
+        left = od::SidePosition(screens, ipad, true);
+        assert(left && left->x == -3904 && left->y == 0);
+        assert(!od::SidePosition(screens, L"missing", true));
+        assert(!od::SidePosition(screens, L"pc", true));
+    }
     WSADATA winsock{};
     assert(WSAStartup(MAKEWORD(2, 2), &winsock) == 0);
     ExpectSecondCandidate(Reply::Silent, "silent-fallback", false);

@@ -20,5 +20,9 @@ struct DisplayInfo {
 
 std::vector<DisplayInfo> EnumerateAttachedDisplays();
 std::optional<DisplayInfo> FindAttachedDisplay(std::wstring_view deviceName);
+// Position only the named extension, starting at the requested primary edge.
+// Existing displays on that side stay in place and extend the horizontal row.
+std::optional<POINT> SidePosition(const std::vector<DisplayInfo>& displays, std::wstring_view extension, bool left);
+std::string HorizontalSide(const std::vector<DisplayInfo>& displays, std::wstring_view extension);
 
 } // namespace od

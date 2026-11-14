@@ -124,6 +124,26 @@ class BridgeEngineTests(unittest.TestCase):
         self.assertEqual(self.worker.start_requests, [])
         self.assertFalse(self.lock.closed)
 
+    def test_qt_events_and_calibrated_start_reach_the_worker(self):
+        self.assertIsInstance(QtCore.QCoreApplication.sendEvent(self.engine,
+                              QtCore.QEvent(QtCore.QEvent.Type.User)), bool)
+        profile = dict(version=1, curve=[[100,.5],[1000,1],[3000,2]], hid_per_px=[20,30],
+                       mm_per_px=[.2,.2], monitor="screen", windows="14,6,10,1",
+                       mouse="mouse", orientation="landscape", board_serial="board-one")
+        self.command("start", {"pointer_profile": profile, "speed": 1.0})
+        self.ready()
+        self.engine.tick()
+        self.assertEqual(self.worker.pointer_profile, profile)
+        self.assertEqual(self.worker.start_requests[0][1], 1.0)
+        self.assertEqual(read_settings(self.engine.settings_path)[0]["pointer_profile"], profile)
+
+    def test_corrupt_profile_can_be_cleared_without_losing_manual_settings(self):
+        self.engine.settings_path.write_text('{"speed":72,"pointer_profile":{"version":7}}')
+        values, warning = read_settings(self.engine.settings_path)
+        self.assertEqual(values["speed"],72)
+        self.assertIsNone(values["pointer_profile"])
+        self.assertTrue(warning)
+
     def test_start_waits_for_real_usb_ble_absolute_and_running(self):
         request = self.command("start", {"mode": "free", "speed": .65,
                                         "hotkey_return_enabled": True, "ipad_side": "left"})
